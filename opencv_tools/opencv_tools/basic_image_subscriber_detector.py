@@ -77,8 +77,8 @@ class ImageSubscriber(Node):
     # Convert ROS Image message to OpenCV image
     current_frame = self.br.imgmsg_to_cv2(data)
 
-    # current_frame = self.detect_lines_canny(current_frame)
     current_frame = self.detect_lines_canny(current_frame)
+    # current_frame = self.detect_edges_dog(current_frame)
      
     # Display image
     cv2.imshow("camera", current_frame)
