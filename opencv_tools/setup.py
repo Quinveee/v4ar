@@ -24,6 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'img_publisher = opencv_tools.basic_image_publisher:main',
+            'img_subscriber = opencv_tools.basic_image_subscriber:main',
         ],
     },
 )
