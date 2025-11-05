@@ -69,27 +69,27 @@ class ImageSubscriber(Node):
 
         return cv2.addWeighted(original, 0.8, line_img, 1, 0)
 
-    import cv2
+    # import cv2
 
-    def detect_edges_dog(image, sigma1=1, sigma2=2):
-        """Simple Difference-of-Gaussians edge detector."""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # def detect_edges_dog(image, sigma1=1, sigma2=2):
+    #     """Simple Difference-of-Gaussians edge detector."""
+    #     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        # Blur with two different Gaussian sigmas
-        blur1 = cv2.GaussianBlur(gray, (0, 0), sigma1)
-        blur2 = cv2.GaussianBlur(gray, (0, 0), sigma2)
+    #     # Blur with two different Gaussian sigmas
+    #     blur1 = cv2.GaussianBlur(gray, (0, 0), sigma1)
+    #     blur2 = cv2.GaussianBlur(gray, (0, 0), sigma2)
 
-        # Difference of Gaussians
-        dog = blur1 - blur2
+    #     # Difference of Gaussians
+    #     dog = blur1 - blur2
 
-        # Normalize for display
-        dog = cv2.normalize(dog, None, 0, 255,
-                            cv2.NORM_MINMAX).astype(np.uint8)
+    #     # Normalize for display
+    #     dog = cv2.normalize(dog, None, 0, 255,
+    #                         cv2.NORM_MINMAX).astype(np.uint8)
 
-        # Optional: threshold to get binary edges
-        _, edges = cv2.threshold(dog, 20, 255, cv2.THRESH_BINARY)
+    #     # Optional: threshold to get binary edges
+    #     _, edges = cv2.threshold(dog, 20, 255, cv2.THRESH_BINARY)
 
-        return edges
+    #     return edges
 
     def listener_callback(self, data):
         """
