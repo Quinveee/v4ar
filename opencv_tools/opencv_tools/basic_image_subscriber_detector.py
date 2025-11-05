@@ -33,6 +33,18 @@ class ImageSubscriber(Node):
        
     # Used to convert between ROS and OpenCV images
     self.br = CvBridge()
+
+    def detect_lines_canny(self, image):
+      """
+      TASK 2: Basic Canny edge detection
+      """
+      # Convert to grayscale
+      gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+      
+      # Apply Canny edge detection
+      edges = cv2.Canny(gray, 50, 150)
+      
+      return edges
     
   def listener_callback(self, data):
     """
@@ -43,11 +55,15 @@ class ImageSubscriber(Node):
   
     # Convert ROS Image message to OpenCV image
     current_frame = self.br.imgmsg_to_cv2(data)
+
+    current_frame = self.detect_lines_canny(current_frame)
      
     # Display image
     cv2.imshow("camera", current_frame)
      
     cv2.waitKey(1)
+
+
    
 def main(args=None):
    
