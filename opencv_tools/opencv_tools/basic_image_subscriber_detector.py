@@ -34,16 +34,37 @@ class ImageSubscriber(Node):
     # Used to convert between ROS and OpenCV images
     self.br = CvBridge()
 
-    def detect_lines_canny(self, image):
-      """
-      TASK 2: Basic Canny edge detection
-      """
-      # Convert to grayscale
+  def detect_lines_canny(self, image):
+    """
+    TASK 2: Basic Canny edge detection
+    """
+    # Convert to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Apply Canny edge detection
+    edges = cv2.Canny(gray, 50, 150)
+    
+    return edges
+
+  import cv2
+
+  def detect_edges_dog(image, sigma1=1, sigma2=2):
+      """Simple Difference-of-Gaussians edge detector."""
       gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-      
-      # Apply Canny edge detection
-      edges = cv2.Canny(gray, 50, 150)
-      
+
+      # Blur with two different Gaussian sigmas
+      blur1 = cv2.GaussianBlur(gray, (0, 0), sigma1)
+      blur2 = cv2.GaussianBlur(gray, (0, 0), sigma2)
+
+      # Difference of Gaussians
+      dog = blur1 - blur2
+
+      # Normalize for display
+      dog = cv2.normalize(dog, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+      # Optional: threshold to get binary edges
+      _, edges = cv2.threshold(dog, 20, 255, cv2.THRESH_BINARY)
+
       return edges
     
   def listener_callback(self, data):
@@ -56,13 +77,13 @@ class ImageSubscriber(Node):
     # Convert ROS Image message to OpenCV image
     current_frame = self.br.imgmsg_to_cv2(data)
 
+    # current_frame = self.detect_lines_canny(current_frame)
     current_frame = self.detect_lines_canny(current_frame)
      
     # Display image
     cv2.imshow("camera", current_frame)
      
     cv2.waitKey(1)
-
 
    
 def main(args=None):
