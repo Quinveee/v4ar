@@ -27,6 +27,7 @@ setup(
             'img_publisher = opencv_tools.basic_image_publisher:main',
             'img_subscriber = opencv_tools.basic_image_subscriber:main',
             'img_subscriber_canny = opencv_tools.basic_image_subscriber_detector:main',
+            'line_follower = opencv_tools.line_follower_node:main',
         ],
     },
 )
