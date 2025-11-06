@@ -11,6 +11,7 @@ from rclpy.node import Node  # Handles the creation of nodes
 from sensor_msgs.msg import Image  # Image is the message type
 from cv_bridge import CvBridge  # Package to convert between ROS and OpenCV Images
 import cv2  # OpenCV library
+import numpy as np
 
 
 class ImageSubscriber(Node):
@@ -50,7 +51,12 @@ class ImageSubscriber(Node):
         # Blur to reduce noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 1.5)
 
-        edges = cv2.Canny(blurred, 50, 150)
+        # threshold image
+        max_intensity = np.max(blurred)
+        threshold = max_intensity * 0.8
+        _, thresh = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
+
+        edges = cv2.Canny(thresh, 50, 150)
 
         # Detect lines using Hough Line Transform
         lines = cv2.HoughLinesP(edges,
@@ -67,9 +73,53 @@ class ImageSubscriber(Node):
                 x1, y1, x2, y2 = line[0]
                 cv2.line(line_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        return cv2.addWeighted(original, 0.8, line_img, 1, 0)
+        # return cv2.addWeighted(original, 0.1, line_img, 1, 0)
 
-    # import cv2
+        return line_img
+
+    def detect_lines_gradient(self, image):
+        """
+        Alternative line detection using gradient + thresholding (no Canny)
+        Works exactly like detect_lines_canny but uses Sobel gradients instead
+        """
+        # Convert to grayscale
+        original = image.copy()
+
+        # Convert to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (5, 5), 1.5)
+
+        # Compute gradients using Sobel operators
+        grad_x = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+
+        # Compute gradient magnitude
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+
+        # Binary threshold on gradient magnitude (equivalent to Canny output)
+        _, edges = cv2.threshold(gradient_magnitude, 50, 255, cv2.THRESH_BINARY)
+        edges = edges.astype(np.uint8)
+
+        # Detect lines using Hough Line Transform (same parameters as Canny version)
+        lines = cv2.HoughLinesP(edges,
+                                rho=1,              # distance resolution in pixels
+                                theta=np.pi/180,    # angle resolution in radians
+                                threshold=80,       # min number of votes
+                                minLineLength=50,   # shortest line to detect
+                                maxLineGap=10)      # max allowed gap between line segments
+
+        # Draw lines on a copy of the original image
+        line_img = image.copy()
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(line_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        return line_img
+
+    import cv2
 
     # def detect_edges_dog(image, sigma1=1, sigma2=2):
     #     """Simple Difference-of-Gaussians edge detector."""

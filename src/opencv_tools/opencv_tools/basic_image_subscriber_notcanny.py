@@ -74,7 +74,7 @@ class ImageSubscriber(Node):
 
     def detect_ceiling_light_brightness(self, image):
         """
-        CEILING LIGHT FOLLOWER: Brightness-based line detection
+        CEILING LIGHT FOLLOWER: Brightness-based line detection with overexposure filtering
         Simple algorithm for following bright ceiling lights - no edge detection needed!
         """
         height, width = image.shape[:2]
@@ -86,10 +86,42 @@ class ImageSubscriber(Node):
         # Apply Gaussian blur to smooth out noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Find bright regions (ceiling lights are typically the brightest)
-        # Use adaptive threshold or simple brightness threshold
-        brightness_threshold = np.mean(blurred) + 1.5 * np.std(blurred)
-        _, bright_mask = cv2.threshold(blurred, brightness_threshold, 255, cv2.THRESH_BINARY)
+        # STEP 1: Remove overexposed/saturated pixels (sunlight/glare removal)
+        # Check if >30% of pixels are at maximum brightness (overexposed)
+        max_brightness = 255
+        overexposed_pixels = np.sum(blurred >= max_brightness)
+        total_pixels = height * width
+        overexposure_ratio = overexposed_pixels / total_pixels
+        
+        # Create mask to exclude overexposed regions
+        if overexposure_ratio > 0.30:  # If >30% pixels are maxed out
+            # Remove pixels that are too bright (likely sun glare/overexposure)
+            overexposure_threshold = 250  # Remove pixels above this value
+            clean_mask = blurred < overexposure_threshold
+            cleaned_image = blurred.copy()
+            cleaned_image[~clean_mask] = 0  # Set overexposed pixels to black
+            
+            # Debug info
+            print(f"Overexposure detected: {overexposure_ratio:.1%} pixels saturated")
+            print(f"Removing pixels above {overexposure_threshold}")
+            
+            # Use cleaned image for further processing
+            processing_image = cleaned_image
+        else:
+            # No significant overexposure, use original
+            processing_image = blurred
+            print(f"Normal lighting: {overexposure_ratio:.1%} pixels saturated")
+        
+        # STEP 2: Find bright regions from the cleaned image (ceiling lights)
+        # Use adaptive threshold on the cleaned image
+        brightness_threshold = np.mean(processing_image) + 0.5 * np.std(processing_image)
+        _, bright_mask = cv2.threshold(processing_image, brightness_threshold, 255, cv2.THRESH_BINARY)
+        
+        # Debug info
+        # bright_pixels = np.sum(bright_mask > 0)
+        # bright_ratio = bright_pixels / total_pixels
+        # print(f"Bright threshold: {brightness_threshold:.1f}")
+        # print(f"Bright pixels found: {bright_ratio:.1%}")
         
         # Morphological operations to clean up and connect light segments
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -105,6 +137,8 @@ class ImageSubscriber(Node):
                                 maxLineGap=20)     # Allow larger gaps for light fixtures
         
         if lines is not None:
+            print(f"Found {len(lines)} total lines")
+            
             # Filter for mostly vertical lines (since camera points up)
             vertical_lines = []
             for line in lines:
@@ -121,11 +155,20 @@ class ImageSubscriber(Node):
                     vertical_lines.append(line[0])
                     cv2.line(line_img, (x1, y1), (x2, y2), (0, 255, 0), 3)
             
+            print(f"Found {len(vertical_lines)} vertical lines")
+            
             # Find the best line to follow (closest to center or longest)
             if vertical_lines:
                 best_line = self.select_line_to_follow(vertical_lines, width, height)
                 if best_line is not None:
                     x1, y1, x2, y2 = best_line
+                    
+                    # Calculate and display angle
+                    if x2 != x1:
+                        angle = np.arctan2(abs(y2 - y1), abs(x2 - x1)) * 180 / np.pi
+                    else:
+                        angle = 90
+                    
                     # Draw the selected line in red
                     cv2.line(line_img, (x1, y1), (x2, y2), (0, 0, 255), 5)
                     
@@ -150,6 +193,18 @@ class ImageSubscriber(Node):
                         color = (255, 100, 0)
                     
                     cv2.putText(line_img, nav_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+                    
+                    # Display angle and overexposure info
+                    angle_text = f"Angle: {angle:.1f}deg"
+                    cv2.putText(line_img, angle_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                    
+                    overexp_text = f"Overexp: {overexposure_ratio:.1%}"
+                    color_overexp = (0, 0, 255) if overexposure_ratio > 0.30 else (255, 255, 255)
+                    cv2.putText(line_img, overexp_text, (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_overexp, 2)
+        else:
+            print("No lines found after filtering!")
+            # Optional: show the bright mask for debugging
+            cv2.imshow("bright_mask_debug", bright_mask)
         
         return line_img
     
