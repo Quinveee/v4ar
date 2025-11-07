@@ -8,9 +8,10 @@ import argparse
 
 
 class ImageSubscriber(Node):
-    def __init__(self, topic_name):
+    def __init__(self, topic_name, display_window=False):
         super().__init__('image_subscriber')
         self.br = CvBridge()
+        self.display_window = display_window
 
         # Automatically detect whether topic is compressed
         self.use_compressed = "compressed" in topic_name.lower()
@@ -40,6 +41,10 @@ class ImageSubscriber(Node):
             else:
                 current_frame = self.br.imgmsg_to_cv2(data)
 
+            if current_frame is not None and self.display_window:
+                cv2.imshow("camera", current_frame)
+                cv2.waitKey(1)
+
             if current_frame is not None:
                 ros_image = self.br.cv2_to_imgmsg(current_frame)
                 self.image_pub.publish(ros_image)
@@ -56,11 +61,14 @@ def main(args=None):
         default="/image_rect/compressed",
         help="Image topic to subscribe to (e.g. /image_raw/compressed or video_frames)"
     )
+    parser.add_argument("--display_window", action="store_true",
+                        help="Display the image in a window")
     parsed_args, ros_args = parser.parse_known_args()
 
     rclpy.init(args=ros_args)
 
-    node = ImageSubscriber(topic_name=parsed_args.topic)
+    node = ImageSubscriber(topic_name=parsed_args.topic,
+                           display_window=parsed_args.display_window)
     rclpy.spin(node)
 
     node.destroy_node()
