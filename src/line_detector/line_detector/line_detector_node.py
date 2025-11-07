@@ -3,6 +3,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from line_msgs.msg import DetectedLine, DetectedLines
+from .skeleton_detector import SkeletonLineDetector
 from .canny_detector import CannyLineDetector
 from .brightness_detector import BrightnessLineDetector
 from .gradient_detector import GradientLineDetector
@@ -18,6 +19,7 @@ DETECTOR_CLASSES = {
     'canny': CannyLineDetector,
     'brightness': BrightnessLineDetector,
     'gradient': GradientLineDetector,
+    'skeleton': SkeletonLineDetector,
 }
 
 
