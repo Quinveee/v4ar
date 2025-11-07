@@ -1,62 +1,59 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from line_msgs.msg import DetectedLine  # custom message
+from line_msgs.msg import DetectedLine
 
 
 class LineFollower(Node):
-    """
-    Node that subscribes to DetectedLine and publishes Twist commands.
-    """
-
     def __init__(self):
         super().__init__('line_follower')
 
-        # --- Parameters ---
-        self.declare_parameter('base_speed', 0.15)
-        self.declare_parameter('Kp_offset', 0.002)
-        self.declare_parameter('Kp_angle', 1.0)
+        #  Publisher to robot velocity commands
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        self.base_speed = self.get_parameter('base_speed').get_parameter_value().double_value
-        self.Kp_offset = self.get_parameter('Kp_offset').get_parameter_value().double_value
-        self.Kp_angle = self.get_parameter('Kp_angle').get_parameter_value().double_value
-
-        # --- Subscriber ---
-        self.subscription = self.create_subscription(
+        # Subscriber to detected line
+        self.sub = self.create_subscription(
             DetectedLine,
-            'detected_line',
-            self.listener_callback,
+            '/detected_line',
+            self.line_callback,
             10
         )
 
-        # --- Publisher ---
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Control parameters
+        self.forward_speed = 0.2  # constant forward velocity
+        self.k_offset = 0.005     # proportional steering gain
+        self.k_angle = 0.01       # proportional angle correction
 
         self.get_logger().info("✅ Line Follower Node started — listening to /detected_line")
 
-    def listener_callback(self, msg: DetectedLine):
-        """Callback for detected line messages."""
-        # Compute control from offset and angle
-        angular_z = -self.Kp_offset * msg.offset_x - self.Kp_angle * msg.angle
+    def line_callback(self, msg: DetectedLine):
+        """
+        Called whenever a DetectedLine message is received.
+        Compute steering command based on line position and orientation.
+        """
+        twist = Twist()
 
-        cmd = Twist()
-        cmd.linear.x = self.base_speed
-        cmd.angular.z = angular_z
+        # Always move forward
+        twist.linear.x = self.forward_speed
 
-        self.cmd_pub.publish(cmd)
+        # Simple P-control for steering:
+        # Turn rate is proportional to how far the line is from the center
+        steering = -(self.k_offset * msg.offset + self.k_angle * msg.angle)
+        twist.angular.z = steering
 
+        # Publish the command
+        self.cmd_pub.publish(twist)
+        self.get_logger().info(f"Forward speed: {self.forward_speed}")
+        self.get_logger().info("Steering: {steering}")
         self.get_logger().info(
-            f"Line offset={msg.offset_x:.1f}, angle={msg.angle:.3f} → angular.z={angular_z:.3f}"
+            f"Line detected | offset={msg.offset:.2f}, angle={msg.angle:.2f} -> steering={steering:.3f}"
         )
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = LineFollower()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
 
