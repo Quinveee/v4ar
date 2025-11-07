@@ -31,7 +31,8 @@ setup(
         'line_follower = opencv_tools.line_follower_node:main',
         'img_subscriber_notcanny = opencv_tools.basic_image_subscriber_notcanny:main',
         'img_subscriber_rect = opencv_tools.basic_image_subscriber_rect:main',
-    ],
+        'img_subscriber_uni = opencv_tools.image_subscriber:main' 
+   ],
 },
 
 )

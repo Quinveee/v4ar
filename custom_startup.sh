@@ -14,6 +14,17 @@ else
     echo "ugv_bringup is already running with PID $PID"
 fi
 
+
+if ! pgrep -f "ros2 run ugv_bringup ugv_driver" > /dev/null; then 
+   echo "Starting uvg_driver..."
+   ros2 run ugv_bringup ugv_driver &
+   PID=$!
+   echo "ugv_driver started with PID $PID"
+else
+  PID=$(pgrep -f "ros2 run ugv_bringup ugv_driver")
+  echo "ugv_driverp is alredy running with PID $PID"
+fi
+
 # --- camera.launch.py ---
 if ! pgrep -f "ros2 launch ugv_vision camera.launch.py" > /dev/null; then
     echo "Starting camera.launch.py..."
