@@ -24,6 +24,8 @@ class ImageSubscriber(Node):
             10
         )
 
+        self.image_pub = self.create_publisher(Image, "processed_image", 10)
+
         self.get_logger().info(
             f"Subscribed to: {topic_name} "
             f"({'Compressed' if self.use_compressed else 'Raw'})"
@@ -39,8 +41,9 @@ class ImageSubscriber(Node):
                 current_frame = self.br.imgmsg_to_cv2(data)
 
             if current_frame is not None:
-                cv2.imshow("camera", current_frame)
-                cv2.waitKey(1)
+                ros_image = self.br.cv2_to_imgmsg(current_frame)
+                self.image_pub.publish(ros_image)
+
         except Exception as e:
             self.get_logger().error(f"Error processing frame: {e}")
 
