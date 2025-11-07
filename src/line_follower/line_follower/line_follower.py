@@ -38,7 +38,7 @@ class LineFollower(Node):
 
         # Simple P-control for steering:
         # Turn rate is proportional to how far the line is from the center
-        steering = -(self.k_offset * msg.offset + self.k_angle * msg.angle)
+        steering = -(self.k_offset * msg.offset_x + self.k_angle * msg.angle)
         twist.angular.z = steering
 
         # Publish the command
@@ -46,7 +46,7 @@ class LineFollower(Node):
         self.get_logger().info(f"Forward speed: {self.forward_speed}")
         self.get_logger().info("Steering: {steering}")
         self.get_logger().info(
-            f"Line detected | offset={msg.offset:.2f}, angle={msg.angle:.2f} -> steering={steering:.3f}"
+            f"Line detected | offset={msg.offset_x:.2f}, angle={msg.angle:.2f} -> steering={steering:.3f}"
         )
 
 
