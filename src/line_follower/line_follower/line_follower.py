@@ -11,12 +11,14 @@ from .closest_line_selector import ClosestLineSelector
 from .confidence_line_selector import ConfidenceLineSelector
 from .mean_line_selector import MeanLineSelector
 from .buffered_line_selector import BufferedLineSelector
+from .tracking_line_selector import TrackingLineSelector
 
 # Available selector classes
 SELECTOR_CLASSES = {
     'closest': ClosestLineSelector,
     'confidence': ConfidenceLineSelector,
     'mean': MeanLineSelector,
+    'tracking': TrackingLineSelector,
 }
 
 
@@ -248,12 +250,14 @@ class LineFollower(Node):
         current_speed = self.calculate_speed(smoothed_angle)
 
         # Compute steering using smoothed angle only (offset removed)
-        steering = (self.k_offset * best_line.offset_x + self.k_angle * smoothed_angle)
+        # steering = -(self.k_offset * best_line.offset_x + self.k_angle * smoothed_angle)
+        steering = +(self.k_angle * (smoothed_angle - math.pi/2))
 
         # Publish movement
         twist = Twist()
         twist.linear.x = current_speed
         twist.angular.z = steering
+
         self.cmd_pub.publish(twist)
 
         self.get_logger().info(
@@ -349,8 +353,8 @@ def main(args=None):
         "--selector",
         type=str,
         default='closest',
-        choices=['closest', 'confidence', 'mean'],
-        help="Line selection strategy: 'closest' (nearest to center), 'confidence' (confidence-based tracking), 'mean' (average of all lines) (default: closest)"
+        choices=['closest', 'confidence', 'mean', 'tracking'],
+        help="Line selection strategy: 'closest' (nearest to center), 'confidence' (confidence-based tracking), 'mean' (average of all lines), 'tracking' (temporal tracking with prediction) (default: closest)"
     )
     parser.add_argument(
         "--extend_lines",
