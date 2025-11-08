@@ -9,9 +9,10 @@ import numpy as np
 
 
 class VisualizationNode(Node):
-    def __init__(self):
+    def __init__(self, record_video=False):
         super().__init__('visualization_node')
         self.bridge = CvBridge()
+        self.record_video = record_video
 
         # Subscriptions
         self.image_sub = self.create_subscription(Image, '/processed_image', self.image_callback, 10)
@@ -24,6 +25,14 @@ class VisualizationNode(Node):
         self.detected_lines = []
         self.selected_line = None
         self.current_twist = Twist()
+
+        # Video recording setup
+        self.video_writer = None
+        self.video_fps = 20  # estimated capture rate
+
+        if self.record_path:
+            os.makedirs(os.path.dirname(self.record_path) or ".", exist_ok=True)
+            self.get_logger().info(f"?? Recording will be saved to: {self.record_path}")
 
         self.get_logger().info("✅ VisualizationNode started — listening to /processed_image, /detected_lines, /selected_line, /cmd_vel")
 
@@ -92,10 +101,32 @@ class VisualizationNode(Node):
         cv2.imshow("Line Visualization", frame)
         cv2.waitKey(1)
 
+        # --- Record if requested
+        if self.record_path:
+            if self.video_writer is None:
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                self.video_writer = cv2.VideoWriter(self.record_path, fourcc, self.video_fps, (w, h))
+                self.get_logger().info("?? Recording started.")
+            self.video_writer.write(frame)
+
+    def destroy_node(self):
+        if self.video_writer is not None:
+            self.video_writer.release()
+            self.get_logger().info(f"Saved recorded video to {self.video_path}")
+        cv2.destroyAllWindows()
+        super().destroy_node()
 
 def main(args=None):
+    import argparse
+    parser = argparse.ArgumentParser(description="ROS2 Windowed Visualization")
+    parser.add_argument(
+        "--record_location", action='store_true',
+        help="Record the visualization output to a video file"
+    )
+    parsed_args, ros_args = parser.parse_known_args()
+
     rclpy.init(args=args)
-    node = VisualizationNode()
+    node = VisualizationNode(record_video=parsed_args.record)
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()

@@ -100,8 +100,8 @@ def main(args=None):
     parser = argparse.ArgumentParser(description="Line Detector Node")
     parser.add_argument("--display_window", action="store_true",
                         help="Display image with detected lines (OpenCV window)")
-    parser.add_argument("--vignette", type=bool, default=False,
-                        help="Vignette parameter for CustomLineDetector only")
+    parser.add_argument("--vignette", action="store_true",
+                        help="Enable vignette masking for CustomLineDetector")
     parsed_args, ros_args = parser.parse_known_args()
 
     rclpy.init(args=ros_args)
