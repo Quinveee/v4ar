@@ -6,13 +6,14 @@ from line_msgs.msg import DetectedLines, DetectedLine
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
+import os
 
 
 class VisualizationNode(Node):
-    def __init__(self, record_video=False):
+    def __init__(self, record_video=None):
         super().__init__('visualization_node')
         self.bridge = CvBridge()
-        self.record_video = record_video
+        self.record_path = record_video
 
         # Subscriptions
         self.image_sub = self.create_subscription(Image, '/processed_image', self.image_callback, 10)
@@ -32,7 +33,8 @@ class VisualizationNode(Node):
 
         if self.record_path:
             os.makedirs(os.path.dirname(self.record_path) or ".", exist_ok=True)
-            self.get_logger().info(f"?? Recording will be saved to: {self.record_path}")
+            self.get_logger().info(f"Current working directory: {os.getcwd()}")
+            self.get_logger().info(f"Recording will be saved to: {self.record_path}")
 
         self.get_logger().info("✅ VisualizationNode started — listening to /processed_image, /detected_lines, /selected_line, /cmd_vel")
 
@@ -83,11 +85,21 @@ class VisualizationNode(Node):
 
         arrow_length = int(100 * abs(steering) + 50)
         start_point = (center_x, h - 50)
-        end_point = (
-            int(center_x + arrow_length * np.sin(-steering)),
-            int(h - 50 - arrow_length * np.cos(-steering))
-        )
-        cv2.arrowedLine(frame, start_point, end_point, (0, 165, 255), 3, tipLength=0.3)
+        # arrow for selected line direction
+        if self.selected_line:
+            ang = self.selected_line.angle
+            cv2.arrowedLine(frame, (center_x, h-100),
+                    (int(center_x + 80*np.cos(ang)),
+                     int(h-100 + 80*np.sin(ang))),
+                    (0,255,255), 2, tipLength=0.3)
+
+        # arrow for steering
+        steer = self.current_twist.angular.z
+        cv2.arrowedLine(frame, (center_x, h-50),
+                (int(center_x + 80*np.sin(steer)),
+                 int(h-50 - 80*np.cos(steer))),
+                (0,165,255), 3, tipLength=0.3)
+
 
         # --- Overlay telemetry text
         cv2.putText(frame, f"Speed: {forward:.2f} m/s", (10, 30),
@@ -120,7 +132,7 @@ def main(args=None):
     import argparse
     parser = argparse.ArgumentParser(description="ROS2 Windowed Visualization")
     parser.add_argument(
-        "--record",
+        "--record_path",
         type=str,
         default=None,
         help="Path to save the recorded visualization video (e.g., '/tmp/output.avi')."
@@ -128,7 +140,7 @@ def main(args=None):
     parsed_args, ros_args = parser.parse_known_args()
 
     rclpy.init(args=args)
-    node = VisualizationNode(record_video=parsed_args.record)
+    node = VisualizationNode(record_video=parsed_args.record_path)
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()

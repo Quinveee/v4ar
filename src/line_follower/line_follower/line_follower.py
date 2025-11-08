@@ -10,6 +10,7 @@ import math
 from .closest_line_selector import ClosestLineSelector
 from .confidence_line_selector import ConfidenceLineSelector
 from .mean_line_selector import MeanLineSelector
+from .buffered_line_selector import BufferedLineSelector
 
 # Available selector classes
 SELECTOR_CLASSES = {
@@ -20,7 +21,8 @@ SELECTOR_CLASSES = {
 
 
 class LineFollower(Node):
-    def __init__(self, smoothing_factor=0.3, speed_control='gradual', selector_type='closest', extend_lines=False):
+    def __init__(self, smoothing_factor=0.3, speed_control='gradual', selector_type='closest', extend_lines=False, 
+                 frame_buffer_size=1, forward_speed=0.2, k_offset=0.005, k_angle=0.01, buffer_use_median=False):
         super().__init__('line_follower')
 
         # Publisher for velocity commands
@@ -53,9 +55,9 @@ class LineFollower(Node):
             )
 
         # Control parameters
-        self.forward_speed = 0.2   # constant forward velocity
-        self.k_offset = 0.005      # proportional gain for horizontal offset
-        self.k_angle = 0.01        # proportional gain for line angle
+        self.forward_speed = forward_speed   # constant forward velocity
+        self.k_offset = k_offset      # proportional gain for horizontal offset
+        self.k_angle = k_angle        # proportional gain for line angle
 
         # Speed control mode
         self.speed_control = speed_control  # 'gradual', 'threshold', or 'none'
@@ -69,8 +71,22 @@ class LineFollower(Node):
         self.raw_angle_history = []
         self.smoothed_angle_history = []
 
-        # Line selector strategy
-        self.selector = SELECTOR_CLASSES.get(selector_type, ClosestLineSelector)()
+        # Line selector strategy - wrap with buffering if needed
+        self.frame_buffer_size = frame_buffer_size
+        self.buffer_use_median = buffer_use_median
+        base_selector = SELECTOR_CLASSES.get(selector_type, ClosestLineSelector)()
+        
+        # Wrap with buffering if frame_buffer_size > 1
+        if frame_buffer_size > 1:
+            self.selector = BufferedLineSelector(
+                inner_selector=base_selector,
+                frame_buffer_size=frame_buffer_size,
+                image_width=640,  # Will be updated when image dimensions are detected
+                use_median=buffer_use_median
+            )
+        else:
+            self.selector = base_selector
+        
         self.selector_type = selector_type
 
         self.get_logger().info(
@@ -85,6 +101,14 @@ class LineFollower(Node):
         self.get_logger().info(
             f"Line extension: {'ENABLED' if extend_lines else 'DISABLED'}"
         )
+        self.get_logger().info(
+            f"Control params: forward_speed={forward_speed:.3f}, k_offset={k_offset:.5f}, k_angle={k_angle:.3f}"
+        )
+        if frame_buffer_size > 1:
+            aggregation_method = 'median' if buffer_use_median else 'mean'
+            self.get_logger().info(
+                f"Frame buffering: ENABLED - updating every {frame_buffer_size} frames using {aggregation_method}"
+            )
 
     # -------------------------------------------------------------------------
     # Image callback (for getting dimensions)
@@ -95,6 +119,9 @@ class LineFollower(Node):
             # Only need to get dimensions once
             image = self.bridge.imgmsg_to_cv2(msg)
             self.image_height, self.image_width = image.shape[:2]
+            # Update buffered selector's image width if using buffering
+            if isinstance(self.selector, BufferedLineSelector):
+                self.selector.image_width = self.image_width
             self.get_logger().info(
                 f"Image dimensions detected: {self.image_width}x{self.image_height}"
             )
@@ -220,8 +247,8 @@ class LineFollower(Node):
         # Adjust speed based on angle using selected control mode
         current_speed = self.calculate_speed(smoothed_angle)
 
-        # Compute steering using smoothed angle
-        steering = -(self.k_offset * best_line.offset_x + self.k_angle * smoothed_angle)
+        # Compute steering using smoothed angle only (offset removed)
+        steering = (self.k_offset * best_line.offset_x + self.k_angle * smoothed_angle)
 
         # Publish movement
         twist = Twist()
@@ -330,6 +357,35 @@ def main(args=None):
         action='store_true',
         help="Extend detected lines to cover full screen before processing (default: False)"
     )
+    parser.add_argument(
+        "--frame_buffer",
+        type=int,
+        default=1,
+        help="Number of frames to buffer before updating control. Set to 1 to disable buffering (default: 1)"
+    )
+    parser.add_argument(
+        "--forward_speed",
+        type=float,
+        default=0.2,
+        help="Constant forward velocity (default: 0.2)"
+    )
+    parser.add_argument(
+        "--k_offset",
+        type=float,
+        default=0.005,
+        help="Proportional gain for horizontal offset (default: 0.005)"
+    )
+    parser.add_argument(
+        "--k_angle",
+        type=float,
+        default=0.01,
+        help="Proportional gain for line angle (default: 0.01)"
+    )
+    parser.add_argument(
+        "--buffer_use_median",
+        action='store_true',
+        help="Use median instead of mean for frame buffering aggregation (default: False, uses mean)"
+    )
     parsed_args, ros_args = parser.parse_known_args()
 
     rclpy.init(args=ros_args)
@@ -338,7 +394,12 @@ def main(args=None):
         smoothing_factor=parsed_args.smoothing_factor,
         speed_control=parsed_args.speed_control,
         selector_type=parsed_args.selector,
-        extend_lines=parsed_args.extend_lines
+        extend_lines=parsed_args.extend_lines,
+        frame_buffer_size=parsed_args.frame_buffer,
+        forward_speed=parsed_args.forward_speed,
+        k_offset=parsed_args.k_offset,
+        k_angle=parsed_args.k_angle,
+        buffer_use_median=parsed_args.buffer_use_median
     )
     
     try:
