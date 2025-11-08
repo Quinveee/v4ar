@@ -106,13 +106,13 @@ class VisualizationNode(Node):
             if self.video_writer is None:
                 fourcc = cv2.VideoWriter_fourcc(*'XVID')
                 self.video_writer = cv2.VideoWriter(self.record_path, fourcc, self.video_fps, (w, h))
-                self.get_logger().info("?? Recording started.")
+                self.get_logger().info("Recording started.")
             self.video_writer.write(frame)
 
     def destroy_node(self):
         if self.video_writer is not None:
             self.video_writer.release()
-            self.get_logger().info(f"Saved recorded video to {self.video_path}")
+            self.get_logger().info(f"Saved recorded video to {self.record_path}")
         cv2.destroyAllWindows()
         super().destroy_node()
 
@@ -120,8 +120,10 @@ def main(args=None):
     import argparse
     parser = argparse.ArgumentParser(description="ROS2 Windowed Visualization")
     parser.add_argument(
-        "--record_location", action='store_true',
-        help="Record the visualization output to a video file"
+        "--record",
+        type=str,
+        default=None,
+        help="Path to save the recorded visualization video (e.g., '/tmp/output.avi')."
     )
     parsed_args, ros_args = parser.parse_known_args()
 
