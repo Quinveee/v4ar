@@ -1,14 +1,15 @@
 import cv2
 import numpy as np
+from .base_detector import BaseLineDetector
 
-class CustomLineDetector:
+class CustomLineDetector(BaseLineDetector):
     """
     Line detector using Sobel gradient magnitude + Hough transform.
     Useful when edges are well defined but not high-contrast enough for Canny.
     Returns a list of (x1, y1, x2, y2) tuples.
     """
 
-    def __init__(self, vignette=False):
+    def __init__(self, vignette=False, *args, **kwargs):
         self.vignette = vignette
 
     def detect(self, image):

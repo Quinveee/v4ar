@@ -1,14 +1,15 @@
 import cv2
 import numpy as np
+from .base_detector import BaseLineDetector
 
-class BrightnessLineDetector:
+class BrightnessLineDetector(BaseLineDetector):
     """
     Brightness-based line detector designed for ceiling light tracking.
     Uses overexposure filtering and Hough transform on bright regions.
     Returns a list of (x1, y1, x2, y2) tuples.
     """
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         pass
 
     def detect(self, image):

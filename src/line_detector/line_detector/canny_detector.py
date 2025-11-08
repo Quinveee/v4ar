@@ -1,13 +1,14 @@
 import cv2
 import numpy as np
+from .base_detector import BaseLineDetector
 
-class CannyLineDetector:
+class CannyLineDetector(BaseLineDetector):
     """
     Simple line detector using Canny edge detection and Hough transform.
     Returns a list of (x1, y1, x2, y2) tuples.
     """
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         pass
 
     def detect(self, image):
