@@ -9,11 +9,13 @@ import argparse
 import math
 from .closest_line_selector import ClosestLineSelector
 from .confidence_line_selector import ConfidenceLineSelector
+from .mean_line_selector import MeanLineSelector
 
 # Available selector classes
 SELECTOR_CLASSES = {
     'closest': ClosestLineSelector,
     'confidence': ConfidenceLineSelector,
+    'mean': MeanLineSelector,
 }
 
 
@@ -320,8 +322,8 @@ def main(args=None):
         "--selector",
         type=str,
         default='closest',
-        choices=['closest', 'confidence'],
-        help="Line selection strategy: 'closest' (nearest to center), 'confidence' (confidence-based tracking) (default: closest)"
+        choices=['closest', 'confidence', 'mean'],
+        help="Line selection strategy: 'closest' (nearest to center), 'confidence' (confidence-based tracking), 'mean' (average of all lines) (default: closest)"
     )
     parser.add_argument(
         "--extend_lines",
