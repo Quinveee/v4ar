@@ -3,16 +3,27 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from line_msgs.msg import DetectedLine, DetectedLines
 from std_msgs.msg import Float32
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 import argparse
+import math
+from .closest_line_selector import ClosestLineSelector
+from .confidence_line_selector import ConfidenceLineSelector
+
+# Available selector classes
+SELECTOR_CLASSES = {
+    'closest': ClosestLineSelector,
+    'confidence': ConfidenceLineSelector,
+}
 
 
 class LineFollower(Node):
-    def __init__(self, smoothing_factor=0.3, speed_control='gradual'):
+    def __init__(self, smoothing_factor=0.3, speed_control='gradual', selector_type='closest', extend_lines=False):
         super().__init__('line_follower')
 
         # Publisher for velocity commands
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        
+
         # Publisher for smoothed angle (for visualization/logging)
         self.smoothed_angle_pub = self.create_publisher(Float32, '/line_follower/smoothed_angle', 10)
         self.selected_line_pub = self.create_publisher(DetectedLine, '/selected_line', 10)
@@ -24,6 +35,20 @@ class LineFollower(Node):
             self.lines_callback,
             10
         )
+
+        # Subscribe to image to get dimensions (for line extension)
+        self.bridge = CvBridge()
+        self.image_width = None
+        self.image_height = None
+        self.extend_lines = extend_lines
+
+        if self.extend_lines:
+            self.image_sub = self.create_subscription(
+                Image,
+                '/processed_image',
+                self.image_callback,
+                10
+            )
 
         # Control parameters
         self.forward_speed = 0.2   # constant forward velocity
@@ -37,10 +62,14 @@ class LineFollower(Node):
         self.alpha = smoothing_factor  # EMA smoothing factor (0-1, higher = more weight to recent)
         self.smoothed_angle = 0.0
         self.first_measurement = True
-        
+
         # History tracking for logging/plotting (stored indefinitely)
         self.raw_angle_history = []
         self.smoothed_angle_history = []
+
+        # Line selector strategy
+        self.selector = SELECTOR_CLASSES.get(selector_type, ClosestLineSelector)()
+        self.selector_type = selector_type
 
         self.get_logger().info(
             f"Line Follower Node started — listening to /detected_lines"
@@ -48,6 +77,105 @@ class LineFollower(Node):
         self.get_logger().info(
             f"EMA smoothing: alpha={smoothing_factor:.2f}, speed_control={speed_control}"
         )
+        self.get_logger().info(
+            f"Line selector: {selector_type} ({type(self.selector).__name__})"
+        )
+        self.get_logger().info(
+            f"Line extension: {'ENABLED' if extend_lines else 'DISABLED'}"
+        )
+
+    # -------------------------------------------------------------------------
+    # Image callback (for getting dimensions)
+    # -------------------------------------------------------------------------
+    def image_callback(self, msg: Image):
+        """Get image dimensions from the image topic."""
+        if self.image_width is None or self.image_height is None:
+            # Only need to get dimensions once
+            image = self.bridge.imgmsg_to_cv2(msg)
+            self.image_height, self.image_width = image.shape[:2]
+            self.get_logger().info(
+                f"Image dimensions detected: {self.image_width}x{self.image_height}"
+            )
+
+    # -------------------------------------------------------------------------
+    # Line extension helper
+    # -------------------------------------------------------------------------
+    def extend_line_to_screen(self, line: DetectedLine) -> DetectedLine:
+        """
+        Extend a line segment to cover the full screen width or height.
+        Uses the line equation to extrapolate to screen boundaries.
+        """
+        if self.image_width is None or self.image_height is None:
+            # If dimensions not available yet, return original line
+            return line
+
+        x1, y1, x2, y2 = float(line.x1), float(line.y1), float(line.x2), float(line.y2)
+
+        # Calculate line direction
+        dx = x2 - x1
+        dy = y2 - y1
+
+        # Avoid division by zero
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return line
+
+        # Find intersections with screen boundaries
+        # We'll extend the line to the edges of the screen
+        t_values = []
+
+        # Check intersection with left edge (x = 0)
+        if abs(dx) > 1e-6:
+            t = -x1 / dx
+            t_values.append(t)
+
+        # Check intersection with right edge (x = width)
+        if abs(dx) > 1e-6:
+            t = (self.image_width - x1) / dx
+            t_values.append(t)
+
+        # Check intersection with top edge (y = 0)
+        if abs(dy) > 1e-6:
+            t = -y1 / dy
+            t_values.append(t)
+
+        # Check intersection with bottom edge (y = height)
+        if abs(dy) > 1e-6:
+            t = (self.image_height - y1) / dy
+            t_values.append(t)
+
+        # Calculate all intersection points
+        points = []
+        for t in t_values:
+            px = x1 + t * dx
+            py = y1 + t * dy
+            # Check if point is within screen bounds
+            if 0 <= px <= self.image_width and 0 <= py <= self.image_height:
+                points.append((px, py))
+
+        # If we have at least 2 valid intersection points, use them
+        if len(points) >= 2:
+            # Use the two most distant points
+            new_x1, new_y1 = points[0]
+            new_x2, new_y2 = points[-1]
+
+            # Create extended line
+            extended_line = DetectedLine()
+            extended_line.header = line.header
+            extended_line.x1 = int(new_x1)
+            extended_line.y1 = int(new_y1)
+            extended_line.x2 = int(new_x2)
+            extended_line.y2 = int(new_y2)
+
+            # Recalculate offset_x and angle for extended line
+            line_center_x = (new_x1 + new_x2) / 2
+            extended_line.offset_x = float(line_center_x - self.image_width / 2)
+            dx_new, dy_new = new_x2 - new_x1, new_y2 - new_y1
+            extended_line.angle = math.atan2(dy_new, dx_new)
+
+            return extended_line
+
+        # If extension failed, return original line
+        return line
 
     # -------------------------------------------------------------------------
     # Main callback
@@ -62,8 +190,17 @@ class LineFollower(Node):
             self.publish_stop()
             return
 
-        # Pick the line we want to follow
-        best_line = self.select_line(msg.lines)
+        # Extend lines to full screen if enabled
+        if self.extend_lines and self.image_width is not None:
+            extended_lines = [self.extend_line_to_screen(line) for line in msg.lines]
+            # Create new message with extended lines
+            extended_msg = DetectedLines()
+            extended_msg.header = msg.header
+            extended_msg.lines = extended_lines
+            msg = extended_msg
+
+        # Pick the line we want to follow using the selected strategy
+        best_line = self.selector.select_line(msg.lines)
 
         if best_line is None:
             self.get_logger().warn(" No valid line found — stopping.")
@@ -154,25 +291,6 @@ class LineFollower(Node):
         return self.smoothed_angle
 
     # -------------------------------------------------------------------------
-    # Line selection strategy
-    # -------------------------------------------------------------------------
-    def select_line(self, lines):
-        """
-        Selects which line to follow.
-        Currently picks the one with smallest |offset_x| (closest to center).
-        """
-        best_line = None
-        min_offset = float('inf')
-
-        for line in lines:
-            offset = abs(line.offset_x)
-            if offset < min_offset:
-                min_offset = offset
-                best_line = line
-
-        return best_line
-
-    # -------------------------------------------------------------------------
     # Safety helper
     # -------------------------------------------------------------------------
     def publish_stop(self):
@@ -198,13 +316,27 @@ def main(args=None):
         choices=['gradual', 'threshold', 'none'],
         help="Speed control mode: 'gradual' (smooth slowdown), 'threshold' (half speed if >30°), 'none' (constant speed) (default: gradual)"
     )
+    parser.add_argument(
+        "--selector",
+        type=str,
+        default='closest',
+        choices=['closest', 'confidence'],
+        help="Line selection strategy: 'closest' (nearest to center), 'confidence' (confidence-based tracking) (default: closest)"
+    )
+    parser.add_argument(
+        "--extend_lines",
+        action='store_true',
+        help="Extend detected lines to cover full screen before processing (default: False)"
+    )
     parsed_args, ros_args = parser.parse_known_args()
 
     rclpy.init(args=ros_args)
-    
+
     node = LineFollower(
         smoothing_factor=parsed_args.smoothing_factor,
-        speed_control=parsed_args.speed_control
+        speed_control=parsed_args.speed_control,
+        selector_type=parsed_args.selector,
+        extend_lines=parsed_args.extend_lines
     )
     
     try:
