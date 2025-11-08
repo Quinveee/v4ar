@@ -2,13 +2,8 @@
 import cv2
 import numpy as np
 import math
+from .base_detector import BaseLineDetector
 
-try:
-    from .base_detector import BaseLineDetector
-except Exception:
-    class BaseLineDetector:  # fallback if base exists elsewhere
-        def detect(self, image):
-            raise NotImplementedError
 
 class SkeletonLineDetector(BaseLineDetector):
     """
@@ -21,7 +16,8 @@ class SkeletonLineDetector(BaseLineDetector):
                  min_line_length=80,
                  max_line_gap=20,
                  angle_tolerance_deg=5,
-                 min_group_size=3):
+                 min_group_size=3,
+                 *args, **kwargs):
         self.percentile = percentile
         self.hough_threshold = hough_threshold
         self.min_line_length = min_line_length

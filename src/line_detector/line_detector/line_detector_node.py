@@ -33,12 +33,10 @@ class LineDetectorNode(Node):
         # Runtime parameter for choosing detector
         self.declare_parameter('detector_type', 'canny')
         detector_type = self.get_parameter('detector_type').value
-        if detector_type != 'custom':
-            self.detector = DETECTOR_CLASSES.get(
-                detector_type, CannyLineDetector)()
-        else:
-            self.detector = CustomLineDetector(vignette=self.vignette)
+        self.detector = DETECTOR_CLASSES.get(
+            detector_type, CannyLineDetector)(vignette=self.vignette)
 
+        
         # Subscriptions & Publications
         self.sub = self.create_subscription(
             Image,
@@ -49,7 +47,7 @@ class LineDetectorNode(Node):
         self.pub = self.create_publisher(DetectedLines, '/detected_lines', 10)
 
         self.get_logger().info(
-            f" LineDetectorNode started with '{detector_type}' detector "
+            f" LineDetectorNode started with '{type(self.detector)}' detector "
             f"(Display window = {'ON' if display_window else 'OFF'})"
         )
 
