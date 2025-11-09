@@ -1,6 +1,10 @@
-# v4ar - Vision for Autonomous Robots
+# v4ar - Vision for Autonomous Robots Lab 1 - Line Following
 
 A ROS2-based autonomous robot vision system for line detection and following. This project provides modular line detection algorithms and intelligent line following control with multiple steering strategies.
+
+## Authors
+
+Alejandro Guerena Gonzalez (15624463), Lukas Bierling (15805220), Oliver van Erven (15570878), Quinten van Engelen (14025779)\\[1ex]
 
 ## Project Structure
 
