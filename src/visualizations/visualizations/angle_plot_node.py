@@ -49,8 +49,8 @@ class AnglePlotNode(Node):
         self.ax.legend()
         self.ax.grid(True, alpha=0.3)
         
-        self.get_logger().info("✅ AnglePlotNode started")
-        self.get_logger().info("   Listening to /selected_line (raw angle from line_follower's selection)")
+        self.get_logger().info("  AnglePlotNode started")
+        self.get_logger().info("   Listening to /detected_lines (raw angle)")
         self.get_logger().info("   Listening to /line_follower/smoothed_angle")
         self.get_logger().info(f"   Displaying last {history_length} measurements")
     
