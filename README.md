@@ -4,7 +4,10 @@ A ROS2-based autonomous robot vision system for line detection and following. Th
 
 ## Authors
 
-Alejandro Guerena Gonzalez (15624463), Lukas Bierling (15805220), Oliver van Erven (15570878), Quinten van Engelen (14025779)\\[1ex]
+- Alejandro Guerena Gonzalez (15624463)
+- Lukas Bierling (15805220)
+- Oliver van Erven (15570878)
+- Quinten van Engelen (14025779)
 
 ## Project Structure
 
