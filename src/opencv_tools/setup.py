@@ -25,12 +25,6 @@ setup(
     entry_points={
     'console_scripts': [
         'img_publisher = opencv_tools.basic_image_publisher:main',
-        'img_subscriber = opencv_tools.basic_image_subscriber:main',
-        'img_subscriber_canny = opencv_tools.basic_image_subscriber_detector:main',
-        'img_subscriber_custom = opencv_tools.basic_image_subscriber_custom:main',
-        'line_follower = opencv_tools.line_follower_node:main',
-        'img_subscriber_notcanny = opencv_tools.basic_image_subscriber_notcanny:main',
-        'img_subscriber_rect = opencv_tools.basic_image_subscriber_rect:main',
         'img_subscriber_uni = opencv_tools.image_subscriber:main' 
    ],
 },
