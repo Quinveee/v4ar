@@ -11,11 +11,11 @@ class AnglePlotNode(Node):
     def __init__(self, history_length=100):
         super().__init__('angle_plot_visualization')
         
-        # Subscriber to raw angle data (from line detection)
-        self.lines_sub = self.create_subscription(
-            DetectedLines,
-            '/detected_lines',
-            self.lines_callback,
+        # Subscriber to raw angle data (from line_follower's selected line)
+        self.selected_line_sub = self.create_subscription(
+            DetectedLine,
+            '/selected_line',
+            self.selected_line_callback,
             10
         )
         
@@ -54,18 +54,10 @@ class AnglePlotNode(Node):
         self.get_logger().info("   Listening to /line_follower/smoothed_angle")
         self.get_logger().info(f"   Displaying last {history_length} measurements")
     
-    def lines_callback(self, msg):
-        """Receive raw angle from detected lines."""
-        if not msg.lines:
-            return
-        
-        # Use the same line selection strategy as line_follower (closest to center)
-        best_line = self.select_line(msg.lines)
-        if best_line is None:
-            return
-        
+    def selected_line_callback(self, msg):
+        """Receive raw angle from line_follower's selected line."""
         current_time = self.get_clock().now().nanoseconds / 1e9 - self.time_start
-        raw_angle = best_line.angle
+        raw_angle = msg.angle
         
         # Store raw angle data
         self.timestamps.append(current_time)
@@ -84,19 +76,6 @@ class AnglePlotNode(Node):
     def smoothed_callback(self, msg):
         """Receive smoothed angle from line follower."""
         self.latest_smoothed = msg.data
-    
-    def select_line(self, lines):
-        """Select the line closest to image center (same as line_follower)."""
-        best_line = None
-        min_offset = float('inf')
-        
-        for line in lines:
-            offset = abs(line.offset_x)
-            if offset < min_offset:
-                min_offset = offset
-                best_line = line
-        
-        return best_line
     
     def update_plot(self):
         """Update the matplotlib plot with latest data."""
