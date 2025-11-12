@@ -1,13 +1,13 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 from glob import glob
 import os
 
-package_name = 'line_follower'
+package_name = 'control'
 
 setup(
     name=package_name,
     version='0.0.0',
-    packages=[package_name],
+    packages=find_packages(include=['control', 'control.*']),
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -18,11 +18,15 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='root@todo.todo',
-    description='Line follower node with multiple steering strategies',
+    description='Control module containing line_follower and related controllers',
     license='MIT',
+    extras_require={
+        'test': ['pytest'],
+    },
     entry_points={
         'console_scripts': [
-            'line_follower = line_follower.line_follower:main',
+            'line_follower = control.line_follower.line_follower:main',
         ],
     },
 )
+
