@@ -36,7 +36,7 @@ class VisualizationNode(Node):
             self.get_logger().info(f"Current working directory: {os.getcwd()}")
             self.get_logger().info(f"Recording will be saved to: {self.record_path}")
 
-        self.get_logger().info("✅ VisualizationNode started — listening to /processed_image, /detected_lines, /selected_line, /cmd_vel")
+        self.get_logger().info("VisualizationNode started — listening to /processed_image, /detected_lines, /selected_line, /cmd_vel")
 
     # -------------------------------------------------------------------------
     # Callbacks
