@@ -94,7 +94,7 @@ class VisualizationNode(Node):
                     (0,255,255), 2, tipLength=0.3)
 
         # arrow for steering
-        steer = -self.current_twist.angular.z
+        steer = - self.current_twist.angular.z
         cv2.arrowedLine(frame, (center_x, h-50),
                 (int(center_x + 80*np.sin(steer)),
                  int(h-50 - 80*np.cos(steer))),
@@ -139,11 +139,15 @@ def main(args=None):
     )
     parsed_args, ros_args = parser.parse_known_args()
 
-    rclpy.init(args=args)
+    rclpy.init(args=ros_args)
     node = VisualizationNode(record_video=parsed_args.record_path)
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
