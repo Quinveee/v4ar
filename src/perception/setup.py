@@ -25,7 +25,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'line_detector = perception.line_detector.line_detector_node:main',
+            'line_detector = perception.line_detector_node:main',
         ],
     },
 )
