@@ -26,10 +26,10 @@ setup(
         ],
     },
     entry_points={
-    'console_scripts': [
-        'img_publisher = image_tools.basic_image_publisher:main',
-        'img_subscriber_uni = image_tools.image_subscriber:main'
-   ],
-},
-
+        'console_scripts': [
+            'img_publisher = image_tools.basic_image_publisher:main',
+            'img_subscriber_uni = image_tools.image_subscriber:main'
+        ],
+    },
 )
+
