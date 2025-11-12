@@ -5,11 +5,15 @@ from line_msgs.msg import DetectedLine, DetectedLines
 import matplotlib.pyplot as plt
 from collections import deque
 import numpy as np
+import cv2
+import os
 
 
 class AnglePlotNode(Node):
-    def __init__(self, history_length=100):
+    def __init__(self, history_length=100, record_video=None):
         super().__init__('angle_plot_visualization')
+        
+        self.record_path = record_video
         
         # Subscriber to raw angle data (from line detection)
         self.lines_sub = self.create_subscription(
@@ -36,6 +40,15 @@ class AnglePlotNode(Node):
         
         # Track latest smoothed angle to pair with raw measurements
         self.latest_smoothed = None
+        
+        # Video recording setup
+        self.video_writer = None
+        self.video_fps = 20  # estimated capture rate
+        
+        if self.record_path:
+            os.makedirs(os.path.dirname(self.record_path) or ".", exist_ok=True)
+            self.get_logger().info(f"Current working directory: {os.getcwd()}")
+            self.get_logger().info(f"Recording will be saved to: {self.record_path}")
         
         # Setup matplotlib for live plotting
         plt.ion()  # Enable interactive mode
@@ -120,6 +133,31 @@ class AnglePlotNode(Node):
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
         plt.pause(0.001)  # Small pause to allow GUI updates
+        
+        # --- Record if requested
+        if self.record_path:
+            # Convert matplotlib figure to image array
+            self.fig.canvas.draw()
+            img = np.frombuffer(self.fig.canvas.tostring_rgb(), dtype=np.uint8)
+            img = img.reshape(self.fig.canvas.get_width_height()[::-1] + (3,))
+            
+            # Convert RGB to BGR for OpenCV
+            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            
+            if self.video_writer is None:
+                h, w = img_bgr.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                self.video_writer = cv2.VideoWriter(self.record_path, fourcc, self.video_fps, (w, h))
+                self.get_logger().info("Recording started.")
+            
+            self.video_writer.write(img_bgr)
+    
+    def destroy_node(self):
+        if self.video_writer is not None:
+            self.video_writer.release()
+            self.get_logger().info(f"Saved recorded video to {self.record_path}")
+        plt.close('all')
+        super().destroy_node()
 
 
 def main(args=None):
@@ -132,11 +170,20 @@ def main(args=None):
         default=100,
         help="Number of data points to display in the plot (default: 100)"
     )
+    parser.add_argument(
+        "--record_path",
+        type=str,
+        default=None,
+        help="Path to save the recorded visualization video (e.g., './angle_plot.avi')."
+    )
     parsed_args, ros_args = parser.parse_known_args()
     
     rclpy.init(args=ros_args)
     
-    node = AnglePlotNode(history_length=parsed_args.history_length)
+    node = AnglePlotNode(
+        history_length=parsed_args.history_length,
+        record_video=parsed_args.record_path
+    )
     
     try:
         rclpy.spin(node)

@@ -23,8 +23,9 @@ SELECTOR_CLASSES = {
 
 
 class LineFollower(Node):
-    def __init__(self, smoothing_factor=0.3, speed_control='gradual', selector_type='closest', extend_lines=False, 
-                 frame_buffer_size=1, forward_speed=0.2, k_offset=0.005, k_angle=0.01, buffer_use_median=False):
+    def __init__(self, smoothing_factor=0.3, speed_control='gradual', selector_type='closest', extend_lines=False,
+                 frame_buffer_size=1, forward_speed=0.2, k_offset=0.005, k_angle=0.01, buffer_use_median=False,
+                 timeout=0.0):
         super().__init__('line_follower')
 
         # Publisher for velocity commands
@@ -60,6 +61,15 @@ class LineFollower(Node):
         self.forward_speed = forward_speed   # constant forward velocity
         self.k_offset = k_offset      # proportional gain for horizontal offset
         self.k_angle = k_angle        # proportional gain for line angle
+
+        # Timeout handling
+        self.timeout_seconds = timeout
+        self.timed_out = False
+        self.shutdown_timer = None
+        if self.timeout_seconds and self.timeout_seconds > 0.0:
+            # One-shot timer: cancel inside callback after first fire
+            self.shutdown_timer = self.create_timer(self.timeout_seconds, self.handle_timeout)
+            self.get_logger().info(f"Automatic timeout armed: {self.timeout_seconds:.1f}s until stop")
 
         # Speed control mode
         self.speed_control = speed_control  # 'gradual', 'threshold', or 'none'
@@ -250,7 +260,6 @@ class LineFollower(Node):
         current_speed = self.calculate_speed(smoothed_angle)
 
         # Compute steering using smoothed angle only (offset removed)
-        # steering = -(self.k_offset * best_line.offset_x + self.k_angle * smoothed_angle)
         steering = +(self.k_angle * (smoothed_angle - math.pi/2))
 
         # Publish movement
@@ -279,10 +288,26 @@ class LineFollower(Node):
         - 'none': Always full speed
         """
         angle_magnitude = abs(smoothed_angle)
+
+        angle_error = smoothed_angle - math.pi / 2
+        angle_mag   = abs(angle_error)
         
         if self.speed_control == 'gradual':
-            # Gradual slowdown: at 0° go full speed, at 90° go ~50% speed
-            speed_factor = max(0.5, 1.0 - (angle_magnitude / 180.0))
+            # Maximum angle we care about (90° = π/2 rad)
+            max_angle = math.pi / 2
+
+            # Clamp so we don't go below min_factor
+            if angle_mag > max_angle:
+                angle_mag = max_angle
+
+            # Linear mapping in radians:
+            #   0       -> 1.0
+            #   max_angle -> min_factor
+            min_factor = 0.5  # change to 0.3 or 0.2 if you want more slowdown
+
+            t = angle_mag / max_angle           # 0 .. 1
+            speed_factor = 1.0 - (1.0 - min_factor) * t
+
             return self.forward_speed * speed_factor
             
         elif self.speed_control == 'threshold':
@@ -332,6 +357,28 @@ class LineFollower(Node):
         twist.linear.x = 0.0
         twist.angular.z = 0.0
         self.cmd_pub.publish(twist)
+
+    # -------------------------------------------------------------------------
+    # Timeout callback
+    # -------------------------------------------------------------------------
+    def handle_timeout(self):
+        """Called when the timeout elapses; stops the robot and shuts down ROS."""
+        if self.timed_out:
+            return  # Already handled
+        self.timed_out = True
+        # Cancel timer to make it one-shot
+        if self.shutdown_timer is not None:
+            try:
+                self.shutdown_timer.cancel()
+            except Exception:
+                pass
+        self.get_logger().warn(f"Timeout ({self.timeout_seconds:.1f}s) reached — stopping and shutting down.")
+        self.publish_stop()
+        # Initiate shutdown; spin will return
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 def main(args=None):
@@ -390,6 +437,12 @@ def main(args=None):
         action='store_true',
         help="Use median instead of mean for frame buffering aggregation (default: False, uses mean)"
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        help="Seconds until automatic stop/shutdown (0 = disabled)"
+    )
     parsed_args, ros_args = parser.parse_known_args()
 
     rclpy.init(args=ros_args)
@@ -403,7 +456,8 @@ def main(args=None):
         forward_speed=parsed_args.forward_speed,
         k_offset=parsed_args.k_offset,
         k_angle=parsed_args.k_angle,
-        buffer_use_median=parsed_args.buffer_use_median
+        buffer_use_median=parsed_args.buffer_use_median,
+        timeout=parsed_args.timeout
     )
     
     try:
@@ -414,8 +468,13 @@ def main(args=None):
             f"Shutting down. Collected {len(node.raw_angle_history)} angle measurements."
         )
     finally:
+        # Avoid duplicate shutdown if timeout already triggered
+        if not node.timed_out:
+            node.publish_stop()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
+        
 
 
 if __name__ == '__main__':
