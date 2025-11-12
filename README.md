@@ -1,22 +1,16 @@
-# v4ar - Vision for Autonomous Robots Lab 1 - Line Following
+# v4ar - Vision for Autonomous Robots
 
 A ROS2-based autonomous robot vision system for line detection and following. This project provides modular line detection algorithms and intelligent line following control with multiple steering strategies.
-
-## Authors
-
-- Alejandro Guerena Gonzalez (15624463)
-- Lukas Bierling (15805220)
-- Oliver van Erven (15570878)
-- Quinten van Engelen (14025779)
 
 ## Project Structure
 
 ```
 src/
-├── line_msgs/           # Custom ROS2 message definitions
-├── line_detector/       # Line detection algorithms (Canny, Brightness, Gradient, Custom)
-├── line_follower/       # Line following control with multiple strategies
-├── opencv_tools/        # OpenCV utilities for image processing
+├── image_tools/         # Image processing utilities for camera feed handling
+│   └── line_msgs/       # Custom ROS2 message definitions
+├── perception/          # Line detection algorithms (Canny, Brightness, Gradient, Custom)
+├── control/             # Control module for robot navigation
+│   └── line_follower/   # Line following control with multiple strategies
 └── visualizations/      # Visualization and plotting nodes
 ```
 
@@ -28,122 +22,95 @@ colcon build
 source install/setup.bash
 ```
 
+## Quick Start - Line Following System
+
+The easiest way to run the complete line following system is using the launch file from the control package:
+
+```bash
+ros2 launch line_follower line_following.launch.py
+```
+
+With custom parameters:
+
+```bash
+ros2 launch line_follower line_following.launch.py \
+  detector_type:=custom \
+  speed_control:=angle_based \
+  selector:=confidence \
+  forward_speed:=0.25 \
+  enable_visualization:=true
+```
+
+This launches the complete pipeline: image subscriber → perception → line follower → optional visualization
+
 ## Core Nodes
 
-### 1. Image Subscriber (opencv_tools)
+### 1. Image Subscriber (image_tools)
 
 Subscribes to camera feed and displays processed images.
 
+**Direct execution:**
+
 ```bash
-ros2 run opencv_tools img_subscriber_uni
+ros2 run image_tools img_subscriber_uni
 ```
 
-### 2. Line Detector Node (line_detector)
+**Via launch file:**
+
+```bash
+ros2 launch image_tools image_subscriber.launch.py
+```
+
+### 2. Perception Node (perception)
 
 Detects lines in camera feed using various algorithms.
 
-**Basic usage:**
+**Direct execution:**
 
 ```bash
-ros2 run line_detector line_detector_node
+ros2 run perception line_detector --ros-args -p detector_type:=custom
 ```
 
-**With parameters:**
+**With detector type parameter:**
 
 ```bash
-# Using custom detector (default)
-ros2 run line_detector line_detector_node --ros-args -p detector_type:=custom
+ros2 run perception line_detector --ros-args -p detector_type:=custom
+```
 
-# Using Canny edge detection
-ros2 run line_detector line_detector_node --ros-args -p detector_type:=canny
+Available detectors: `custom`, `canny`, `brightness`, `gradient`, `skeleton`
 
-# Using brightness-based detection
-ros2 run line_detector line_detector_node --ros-args -p detector_type:=brightness
+**Via launch file:**
 
-# Using gradient-based detection
-ros2 run line_detector line_detector_node --ros-args -p detector_type:=gradient
-
-# Using skeleton detection
-ros2 run line_detector line_detector_node --ros-args -p detector_type:=skeleton
-
-# Enable display window
-ros2 run line_detector line_detector_node --display_window
-
-# Enable vignette masking (for custom detector)
-ros2 run line_detector line_detector_node --vignette
+```bash
+ros2 launch perception image_detection.launch.py detector_type:=custom
 ```
 
 ### 3. Line Follower Node (line_follower)
 
 Controls robot movement to follow detected lines.
 
-**Basic usage:**
+**Direct execution:**
 
 ```bash
 ros2 run line_follower line_follower
 ```
 
-**With speed control modes:**
-
-```bash
-# Gradual speed control (default) - smooth slowdown based on angle
-ros2 run line_follower line_follower --speed_control gradual
-
-# Threshold speed control - half speed if angle > 30 degrees
-ros2 run line_follower line_follower --speed_control threshold
-
-# Angle-based speed control - increase speed when angle < threshold
-ros2 run line_follower line_follower --speed_control angle_based --angle_threshold 5.0
-
-# No speed adjustment - constant speed
-ros2 run line_follower line_follower --speed_control none
-```
-
-**With line selection strategies:**
-
-```bash
-# Closest to center (default)
-ros2 run line_follower line_follower --selector closest
-
-# Confidence-based tracking
-ros2 run line_follower line_follower --selector confidence
-
-# Mean of all detected lines
-ros2 run line_follower line_follower --selector mean
-
-# Tracking-based selection
-ros2 run line_follower line_follower --selector tracking
-```
-
-**With smoothing and control parameters:**
-
-```bash
-# EMA smoothing factor (0-1, higher = more weight to recent values)
-ros2 run line_follower line_follower --smoothing_factor 0.5
-
-# Forward speed (default: 0.2)
-ros2 run line_follower line_follower --forward_speed 0.3
-
-# Proportional gain for angle (default: 0.01)
-ros2 run line_follower line_follower --k_angle 0.015
-
-# Proportional gain for offset (default: 0.005)
-ros2 run line_follower line_follower --k_offset 0.008
-
-# Enable line extension to full screen
-ros2 run line_follower line_follower --extend_lines
-```
-
-**Combined example:**
+**With parameters:**
 
 ```bash
 ros2 run line_follower line_follower \
   --speed_control angle_based \
-  --angle_threshold 5.0 \
   --selector confidence \
   --smoothing_factor 0.3 \
-  --forward_speed 0.25 \
-  --k_angle 0.01
+  --forward_speed 0.25
+```
+
+**Via launch file:**
+
+```bash
+ros2 launch line_follower line_follower.launch.py \
+  speed_control:=angle_based \
+  selector:=confidence
 ```
 
 ### 4. Visualization Node (visualizations)
@@ -162,38 +129,53 @@ Plots line angle measurements over time.
 ros2 run visualizations angle_plot_node
 ```
 
-## Complete System Startup
+## Launch Files
 
-Run all nodes together for a complete line following system:
+### Complete Line Following System
 
 ```bash
-# Terminal 1: Image subscriber
-ros2 run opencv_tools img_subscriber_uni
-
-# Terminal 2: Line detector
-ros2 run line_detector line_detector_node --ros-args -p detector_type:=skeleton
-
-# Terminal 3: Line follower
-ros2 run line_follower line_follower --speed_control gradual --k_angle 0.4 --selector tracking --forward_speed 0.35
-
-# Terminal 4 (optional): Visualization
-ros2 run visualizations visualization_node
-
-# Terminal 5 (optional): Angle plotting
-ros2 run visualizations angle_plot_node
+ros2 launch line_follower line_following.launch.py
 ```
 
-Or use the provided shell scripts:
+**Available parameters:**
+
+- `detector_type` (default: custom) - Detection algorithm
+- `speed_control` (default: gradual) - Speed control mode
+- `selector` (default: closest) - Line selection strategy
+- `smoothing_factor` (default: 0.3) - EMA smoothing factor
+- `forward_speed` (default: 0.2) - Base forward velocity
+- `enable_visualization` (default: false) - Enable visualization node
+
+**Example with all parameters:**
 
 ```bash
-# Basic line following
-bash ros_cmds/line_following.sh
+ros2 launch line_follower line_following.launch.py \
+  detector_type:=custom \
+  speed_control:=angle_based \
+  selector:=confidence \
+  smoothing_factor:=0.4 \
+  forward_speed:=0.3 \
+  enable_visualization:=true
+```
 
-# Line following with confidence selector
-bash ros_cmds/line_following_confidence.sh
+### Individual Launch Files
 
-# Camera only
-bash ros_cmds/cam.sh
+Image subscriber:
+
+```bash
+ros2 launch image_tools image_subscriber.launch.py
+```
+
+Image detection:
+
+```bash
+ros2 launch image_detection image_detection.launch.py detector_type:=custom
+```
+
+Line follower:
+
+```bash
+ros2 launch line_follower line_follower.launch.py speed_control:=angle_based
 ```
 
 ## Line Follower Control Modes
@@ -235,7 +217,6 @@ Key parameters for tuning:
 - `forward_speed`: Base forward velocity (0.0-1.0).
 - `k_angle`: Steering gain for angle error. Higher = more aggressive steering.
 - `k_offset`: Steering gain for lateral offset. Higher = more aggressive centering.
-- `angle_threshold`: Threshold for angle-based speed control (in degrees).
 
 ## Message Definitions
 
