@@ -26,7 +26,9 @@ setup(
     entry_points={
         'console_scripts': [
             'line_detector = line_detector.line_detector_node:main',
-            'marker_detector = marker_detector.apriltag_vis_node:main',
+            'apriltag_vis_node = marker_detector.apriltag_vis_node:main',
+            'apriltag_vis_node_2 = marker_detector.apriltag_vis_node_2:main',
+            'camera_calibration = marker_detector.camera_calibration:main',
         ],
     },
 )
