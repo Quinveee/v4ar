@@ -7,7 +7,7 @@ package_name = 'image_tools'
 setup(
     name=package_name,
     version='0.0.0',
-    packages=find_packages(exclude=['test', 'line_msgs']),
+    packages=find_packages(exclude=['test', 'line_msgs'], include=['image_tools', '*image_tools*']),
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -28,7 +28,8 @@ setup(
     entry_points={
         'console_scripts': [
             'img_publisher = image_tools.basic_image_publisher:main',
-            'img_subscriber_uni = image_tools.image_subscriber:main'
+            'img_subscriber_uni = image_tools.image_subscriber:main',
+            'img = image_tools.image_subscriber:main'
         ],
     },
 )

@@ -16,10 +16,14 @@ class VisualizationNode(Node):
         self.record_path = record_video
 
         # Subscriptions
-        self.image_sub = self.create_subscription(Image, '/processed_image', self.image_callback, 10)
-        self.lines_sub = self.create_subscription(DetectedLines, '/detected_lines', self.lines_callback, 10)
-        self.selected_line_sub = self.create_subscription(DetectedLine, '/selected_line', self.selected_line_callback, 10)
-        self.cmd_sub = self.create_subscription(Twist, '/cmd_vel', self.cmd_callback, 10)
+        self.image_sub = self.create_subscription(
+            Image, '/processed_image', self.image_callback, 10)
+        self.lines_sub = self.create_subscription(
+            DetectedLines, '/detected_lines', self.lines_callback, 10)
+        self.selected_line_sub = self.create_subscription(
+            DetectedLine, '/selected_line', self.selected_line_callback, 10)
+        self.cmd_sub = self.create_subscription(
+            Twist, '/cmd_vel', self.cmd_callback, 10)
 
         # Buffers for latest data
         self.latest_image = None
@@ -32,11 +36,14 @@ class VisualizationNode(Node):
         self.video_fps = 20  # estimated capture rate
 
         if self.record_path:
-            os.makedirs(os.path.dirname(self.record_path) or ".", exist_ok=True)
+            os.makedirs(os.path.dirname(self.record_path)
+                        or ".", exist_ok=True)
             self.get_logger().info(f"Current working directory: {os.getcwd()}")
-            self.get_logger().info(f"Recording will be saved to: {self.record_path}")
+            self.get_logger().info(
+                f"Recording will be saved to: {self.record_path}")
 
-        self.get_logger().info("VisualizationNode started — listening to /processed_image, /detected_lines, /selected_line, /cmd_vel")
+        self.get_logger().info(
+            "VisualizationNode started — listening to /processed_image, /detected_lines, /selected_line, /cmd_vel")
 
     # -------------------------------------------------------------------------
     # Callbacks
@@ -66,13 +73,15 @@ class VisualizationNode(Node):
 
         # --- Draw detected lines (green)
         for line in self.detected_lines:
-            x1, y1, x2, y2 = int(line.x1), int(line.y1), int(line.x2), int(line.y2)
+            x1, y1, x2, y2 = int(line.x1), int(
+                line.y1), int(line.x2), int(line.y2)
             cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
         # --- Draw selected line (red, thicker)
         if self.selected_line is not None:
             sl = self.selected_line
-            cv2.line(frame, (int(sl.x1), int(sl.y1)), (int(sl.x2), int(sl.y2)), (0, 0, 255), 4)
+            cv2.line(frame, (int(sl.x1), int(sl.y1)),
+                     (int(sl.x2), int(sl.y2)), (0, 0, 255), 4)
             cv2.putText(frame, "Selected Line", (int(sl.x1), int(sl.y1) - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
@@ -89,17 +98,16 @@ class VisualizationNode(Node):
         if self.selected_line:
             ang = self.selected_line.angle
             cv2.arrowedLine(frame, (center_x, h-100),
-                    (int(center_x + 80*np.cos(ang)),
-                     int(h-100 + 80*np.sin(ang))),
-                    (0,255,255), 2, tipLength=0.3)
+                            (int(center_x + 80*np.cos(ang)),
+                             int(h-100 + 80*np.sin(ang))),
+                            (0, 255, 255), 2, tipLength=0.3)
 
         # arrow for steering
         steer = - self.current_twist.angular.z
         cv2.arrowedLine(frame, (center_x, h-50),
-                (int(center_x + 80*np.sin(steer)),
-                 int(h-50 - 80*np.cos(steer))),
-                (0,165,255), 3, tipLength=0.3)
-
+                        (int(center_x + 80*np.sin(steer)),
+                         int(h-50 - 80*np.cos(steer))),
+                        (0, 165, 255), 3, tipLength=0.3)
 
         # --- Overlay telemetry text
         cv2.putText(frame, f"Speed: {forward:.2f} m/s", (10, 30),
@@ -117,16 +125,19 @@ class VisualizationNode(Node):
         if self.record_path:
             if self.video_writer is None:
                 fourcc = cv2.VideoWriter_fourcc(*'XVID')
-                self.video_writer = cv2.VideoWriter(self.record_path, fourcc, self.video_fps, (w, h))
+                self.video_writer = cv2.VideoWriter(
+                    self.record_path, fourcc, self.video_fps, (w, h))
                 self.get_logger().info("Recording started.")
             self.video_writer.write(frame)
 
     def destroy_node(self):
         if self.video_writer is not None:
             self.video_writer.release()
-            self.get_logger().info(f"Saved recorded video to {self.record_path}")
+            self.get_logger().info(
+                f"Saved recorded video to {self.record_path}")
         cv2.destroyAllWindows()
         super().destroy_node()
+
 
 def main(args=None):
     import argparse

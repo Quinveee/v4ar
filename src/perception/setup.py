@@ -9,12 +9,13 @@ setup(
     version='0.0.0',
     packages=find_packages(
         where='.',  # search in current dir
-        include=['marker_detector', 'line_detector', '*detector*']
+        include=['marker_detector', "*marker_detector*",'line_detector', '*detector*', 'launch', 'config']
     ),
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'launch'), glob(os.path.join('launch', '*.py'))),
+        (os.path.join('share', package_name, 'launch'), glob(os.path.join('launch', '*_launch.py'))),        
+        (os.path.join('share', package_name, 'config'), glob(os.path.join('config', '*.yaml'))),
     ],
     install_requires=['setuptools', "pupil-apriltags"],
     zip_safe=True,
@@ -29,6 +30,8 @@ setup(
             'apriltag_vis_node = marker_detector.apriltag_vis_node:main',
             'apriltag_vis_node_2 = marker_detector.apriltag_vis_node_2:main',
             'camera_calibration = marker_detector.camera_calibration:main',
+            'triangulation = marker_detector.triangulation_node:main',
+            'apriltag = marker_detector.apriltag_detector:main',
         ],
     },
 )

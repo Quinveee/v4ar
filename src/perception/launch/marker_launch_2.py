@@ -59,7 +59,7 @@ def generate_launch_description():
     # Using Node action instead of ExecuteProcess - this is the ROS2 way!
     apriltag_node = Node(
         package='perception',
-        executable='apriltag_vis_node',  # This should match the entry point in setup.py
+        executable='apriltag_vis_node_2',  # This should match the entry point in setup.py
         name='apriltag_visualization',
         output='screen',
         parameters=[{
