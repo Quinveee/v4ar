@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-AprilTag Detection with PnP Pose - DUAL FREQUENCY OPTIMIZATION + BUFFERING
-Low-res detection runs fast, high-res detection runs slower
-Includes temporal buffering for stability with proper timeout handling
+AprilTag Detection - FIXED PRIORITY (High-res always overrides low-res)
 """
 
 import rclpy
@@ -83,12 +81,12 @@ class AprilTagVisualizationNode(Node):
         self.buffer_max_age_sec = buffer_max_age_sec
         self.buffer_alpha = buffer_alpha
         
-        # Detection state: stores currently detected tags (cleared each high-res cycle)
         self.current_detections = {}
-        
-        # Buffer state: stores smoothed markers with timestamps
-        # marker_id -> {"marker": MarkerPose, "last_seen": float (timestamp)}
         self.marker_buffer = {}
+        
+        # Track detection difficulty
+        self.detection_history = []
+        self.use_adaptive_scales = True
         
         self.color_sub = self.create_subscription(Image, '/color/image', self.color_callback, 10)
         self.color_info_sub = self.create_subscription(CameraInfo, '/color/camera_info', self.camera_info_callback, 1)
@@ -116,9 +114,15 @@ class AprilTagVisualizationNode(Node):
         self.buffer_alpha = self.get_parameter('buffer_alpha').value
 
         self.detector = apriltag(
-            self.tag_family, threads=2, maxhamming=2, decimate=0.25,
-            blur=0.0, refine_edges=True, debug=False
+            self.tag_family, 
+            threads=2, 
+            maxhamming=2,
+            decimate=0.2,
+            blur=0.0,
+            refine_edges=True,
+            debug=False
         )
+        
         self.get_logger().info(f"AprilTag detector initialized: {self.tag_family}")
         self.get_logger().info(f"Tag size: {self.tag_size}m")
 
@@ -126,16 +130,12 @@ class AprilTagVisualizationNode(Node):
             cv2.namedWindow("Detected AprilTags", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Detected AprilTags", 640, 480) 
 
-        self.get_logger().info(f"Dual-frequency detection:")
-        self.get_logger().info(f"  Low-res (160px): {self.low_res_fps} Hz")
-        self.get_logger().info(f"  High-res (320px): {self.high_res_fps} Hz")
+        self.get_logger().info(f"Adaptive dual-frequency detection:")
+        self.get_logger().info(f"  Low-res (120px): {self.low_res_fps} Hz - fast tracking")
+        self.get_logger().info(f"  High-res (240-400px): {self.high_res_fps} Hz - accurate pose")
         
         if self.enable_buffer:
-            self.get_logger().info(f"Buffering ENABLED:")
-            self.get_logger().info(f"  Max age: {self.buffer_max_age_sec}s")
-            self.get_logger().info(f"  Smoothing alpha: {self.buffer_alpha}")
-        else:
-            self.get_logger().info("Buffering DISABLED")
+            self.get_logger().info(f"Buffering ENABLED (age={self.buffer_max_age_sec}s, alpha={self.buffer_alpha})")
 
 
     def color_callback(self, msg: Image):
@@ -159,51 +159,95 @@ class AprilTagVisualizationNode(Node):
             self.destroy_subscription(self.color_info_sub)
 
 
+    def _should_use_extra_scales(self):
+        """Decide if we need extra scales based on recent detection difficulty"""
+        if not self.use_adaptive_scales or len(self.detection_history) < 3:
+            return False
+        
+        recent_detections = self.detection_history[-5:]
+        avg_detections = sum(recent_detections) / len(recent_detections)
+        
+        return avg_detections < 1.5
+
+
     def process_low_res(self):
-        """Fast low-res detection - updates current_detections"""
+        """
+        Fast low-res detection for TRACKING ONLY.
+        Used to discover new tags quickly, but will be overridden by high-res.
+        """
         if not self._check_data_ready():
             return
         
-        detections = self._detect_at_resolution(160)
+        detections = self._detect_at_resolution(120)
         
-        # Add to current detections (will be cleared after high-res processing)
         for d in detections:
             tag_id = d['id']
+            # FIXED: Only add if NOT exists OR if existing is also low-res
             if tag_id not in self.current_detections:
                 self.current_detections[tag_id] = {
                     'detection': d,
-                    'scale_factor': 160 / self.current_color_msg.width,
+                    'scale_factor': 120 / self.current_color_msg.width,
+                    'resolution': 120,  # NEW: Track resolution
                     'source': 'low_res'
                 }
 
 
     def process_high_res(self):
-        """Slow high-res detection - calculates poses and publishes"""
+        """
+        Accurate high-res detection for POSE ESTIMATION.
+        ALWAYS overrides low-res detections.
+        """
         if not self._check_data_ready():
             return
         
-        detections = self._detect_at_resolution(320)
+        # Adaptive scaling
+        if self._should_use_extra_scales():
+            scales = [240, 320, 400]
+            self.get_logger().info("Using extra scales", throttle_duration_sec=5.0)
+        else:
+            scales = [240, 320]
         
-        # Override with high-res detections (more accurate)
-        for d in detections:
-            tag_id = d['id']
-            self.current_detections[tag_id] = {
-                'detection': d,
-                'scale_factor': 320 / self.current_color_msg.width,
-                'source': 'high_res'
-            }
+        # Detect at each scale, keeping highest resolution
+        for scale_width in scales:
+            detections = self._detect_at_resolution(scale_width)
+            
+            for d in detections:
+                tag_id = d['id']
+                
+                # CRITICAL FIX: Always override if higher resolution
+                should_update = False
+                
+                if tag_id not in self.current_detections:
+                    # New detection
+                    should_update = True
+                else:
+                    # Compare resolutions - higher res ALWAYS wins
+                    existing_res = self.current_detections[tag_id].get('resolution', 0)
+                    if scale_width > existing_res:
+                        should_update = True
+                
+                if should_update:
+                    self.current_detections[tag_id] = {
+                        'detection': d,
+                        'scale_factor': scale_width / self.current_color_msg.width,
+                        'resolution': scale_width,  # Track resolution
+                        'source': f'high_res_{scale_width}'
+                    }
+        
+        # Track detection count
+        self.detection_history.append(len(self.current_detections))
+        if len(self.detection_history) > 10:
+            self.detection_history.pop(0)
         
         # Calculate poses and publish
         self._calculate_and_publish_poses()
         
-        # CRITICAL: Clear current detections after publishing
-        # This ensures we only publish what we actually see in this frame
+        # Clear for next cycle
         self.current_detections.clear()
 
 
     def _check_data_ready(self):
         if self.current_color_msg is None or not self.camera_info_received:
-            self.get_logger().warn("Waiting for data...", throttle_duration_sec=2.0)
             return False
         return True
 
@@ -222,8 +266,15 @@ class AprilTagVisualizationNode(Node):
             )
             
             gray = cv2.cvtColor(downscaled, cv2.COLOR_BGR2GRAY)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            
+            # Preprocessing
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
             gray = clahe.apply(gray)
+            
+            # Only sharpen for small scales
+            if target_width <= 160:
+                kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32) / 1.5
+                gray = cv2.filter2D(gray, -1, kernel)
             
             return self.detector.detect(gray)
             
@@ -233,7 +284,7 @@ class AprilTagVisualizationNode(Node):
 
 
     def _calculate_and_publish_poses(self):
-        """Calculate 3D poses using PnP and publish for all detected tags"""
+        """Calculate 3D poses using PnP - now uses highest resolution available"""
         try:
             color_image = self.bridge.imgmsg_to_cv2(self.current_color_msg, 'bgr8')
             color_image_rectified = cv2.remap(color_image, self.mapx, self.mapy, cv2.INTER_LINEAR)
@@ -242,24 +293,19 @@ class AprilTagVisualizationNode(Node):
             return
         
         detected_vis = color_image_rectified.copy()
-        
-        # Get current timestamp
-        now = self.get_clock().now().nanoseconds / 1e9  # Convert to seconds
+        now = self.get_clock().now().nanoseconds / 1e9
 
         s = self.tag_size / 2.0
         obj_pts = np.array([
-            [-s,  s, 0],
-            [ s,  s, 0],
-            [ s, -s, 0],
-            [-s, -s, 0]
+            [-s,  s, 0], [ s,  s, 0], [ s, -s, 0], [-s, -s, 0]
         ], dtype=np.float32)
 
-        # Process current detections and update buffer
         current_frame_ids = set()
         
         for tag_id, data in self.current_detections.items():
             d = data['detection']
             scale_factor = data['scale_factor']
+            resolution = data['resolution']
             
             try:
                 if 'lb' in d:
@@ -269,6 +315,7 @@ class AprilTagVisualizationNode(Node):
                 else: 
                     continue
                 
+                # Scale corners back to full resolution
                 corners_full_res = (corners_d / scale_factor).astype(np.float32)
                 center_full_res = (d['center'] / scale_factor).astype(int)
                 
@@ -279,6 +326,7 @@ class AprilTagVisualizationNode(Node):
                 pose_msg = Pose()
                 distance_value = -1.0
                 
+                # PnP with high-res corners
                 img_pts = np.array([lt, rt, rb, lb], dtype=np.float32)
                 dist_coeffs = np.zeros((4, 1), dtype=np.float32)
                 
@@ -304,7 +352,6 @@ class AprilTagVisualizationNode(Node):
                 pose_msg.orientation.z = qz
                 pose_msg.orientation.w = qw
 
-                # Create marker message
                 marker_msg = MarkerPose()
                 marker_msg.id = int(tag_id)
                 marker_msg.pose = pose_msg
@@ -318,18 +365,13 @@ class AprilTagVisualizationNode(Node):
                 marker_msg.bbox_x_max = float(max(xs))
                 marker_msg.bbox_y_max = float(max(ys))
                 
-                # Update buffer with smoothing if enabled
+                # Buffering with smoothing
                 if self.enable_buffer and tag_id in self.marker_buffer:
                     prev_marker = self.marker_buffer[tag_id]['marker']
-                    
-                    # Exponential moving average for distance
-                    smoothed_distance = (
+                    marker_msg.distance = (
                         self.buffer_alpha * marker_msg.distance +
                         (1.0 - self.buffer_alpha) * prev_marker.distance
                     )
-                    marker_msg.distance = smoothed_distance
-                    
-                    # Smooth position (optional, comment out if too slow)
                     marker_msg.pose.position.x = (
                         self.buffer_alpha * marker_msg.pose.position.x +
                         (1.0 - self.buffer_alpha) * prev_marker.pose.position.x
@@ -343,67 +385,52 @@ class AprilTagVisualizationNode(Node):
                         (1.0 - self.buffer_alpha) * prev_marker.pose.position.z
                     )
                 
-                # Update buffer
                 self.marker_buffer[tag_id] = {
                     'marker': copy.deepcopy(marker_msg),
-                    'last_seen': now
+                    'last_seen': now,
+                    'resolution': resolution  # Track what resolution was used
                 }
                 
                 current_frame_ids.add(tag_id)
 
             except Exception as e:
-                self.get_logger().error(f"Pose calculation error for tag {tag_id}: {e}")
+                self.get_logger().error(f"Pose error for tag {tag_id}: {e}")
                 continue
 
-        # Remove stale markers from buffer
-        ids_to_remove = []
-        for marker_id, buffer_data in self.marker_buffer.items():
-            age = now - buffer_data['last_seen']
-            if age > self.buffer_max_age_sec:
-                ids_to_remove.append(marker_id)
-        
-        for marker_id in ids_to_remove:
-            del self.marker_buffer[marker_id]
-            self.get_logger().info(f"Tag {marker_id} timed out (not seen for {self.buffer_max_age_sec}s)")
+        # Remove stale markers
+        ids_to_remove = [mid for mid, data in self.marker_buffer.items() 
+                        if (now - data['last_seen']) > self.buffer_max_age_sec]
+        for mid in ids_to_remove:
+            del self.marker_buffer[mid]
 
-        # Build message to publish (only from buffer if enabled, otherwise from current detections)
+        # Publish
         marker_array_msg = MarkerPoseArray()
         marker_array_msg.header.stamp = self.current_color_msg.header.stamp
         marker_array_msg.header.frame_id = self.current_color_msg.header.frame_id
 
         if self.enable_buffer:
-            # Publish all markers in buffer that are fresh
             for marker_id, buffer_data in self.marker_buffer.items():
                 marker_array_msg.markers.append(buffer_data['marker'])
         else:
-            # Publish only current frame detections
             for marker_id in current_frame_ids:
                 if marker_id in self.marker_buffer:
                     marker_array_msg.markers.append(self.marker_buffer[marker_id]['marker'])
 
-        # Visualize only markers we're publishing
+        # Visualize
         for marker_msg in marker_array_msg.markers:
-            # Find corners from marker (reconstruct from bbox for visualization)
-            cx = int(marker_msg.center_x)
-            cy = int(marker_msg.center_y)
-            
-            # Simple visualization
+            cx, cy = int(marker_msg.center_x), int(marker_msg.center_y)
             cv2.circle(detected_vis, (cx, cy), 5, (0, 0, 255), -1)
             
-            # Draw bounding box
-            x_min = int(marker_msg.bbox_x_min)
-            y_min = int(marker_msg.bbox_y_min)
-            x_max = int(marker_msg.bbox_x_max)
-            y_max = int(marker_msg.bbox_y_max)
-            
+            x_min, y_min = int(marker_msg.bbox_x_min), int(marker_msg.bbox_y_min)
+            x_max, y_max = int(marker_msg.bbox_x_max), int(marker_msg.bbox_y_max)
             cv2.rectangle(detected_vis, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
             
-            # Label
-            source = "buffered" if self.enable_buffer and marker_msg.id not in current_frame_ids else "current"
-            cv2.putText(detected_vis, f"id={marker_msg.id} [{source}]",
-                       (x_min, y_min - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # Show which resolution was used for pose
+            res_used = self.marker_buffer.get(marker_msg.id, {}).get('resolution', '?')
+            cv2.putText(detected_vis, f"id={marker_msg.id} @{res_used}px",
+                       (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             cv2.putText(detected_vis, f"D={marker_msg.distance:.2f}m",
-                       (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                       (x_min, y_max + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
         self.pub.publish(marker_array_msg)
         
@@ -422,13 +449,13 @@ def main(args=None):
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag_family", type=str, default="tagStandard41h12")
-    parser.add_argument("--tag_size", type=float, default=0.162, help="Tag size in meters")
+    parser.add_argument("--tag_size", type=float, default=0.162)
     parser.add_argument("--no_gui", action="store_true")
-    parser.add_argument("--low_res_fps", type=float, default=10.0, help="Low-res detection frequency")
-    parser.add_argument("--high_res_fps", type=float, default=3.0, help="High-res detection frequency")
-    parser.add_argument("--enable_buffer", action="store_true", help="Enable temporal buffering")
-    parser.add_argument("--buffer_max_age", type=float, default=0.5, help="Max age for buffered markers (seconds)")
-    parser.add_argument("--buffer_alpha", type=float, default=0.7, help="Smoothing factor (0-1, higher = more responsive)")
+    parser.add_argument("--low_res_fps", type=float, default=10.0)
+    parser.add_argument("--high_res_fps", type=float, default=3.0)
+    parser.add_argument("--enable_buffer", action="store_true")
+    parser.add_argument("--buffer_max_age", type=float, default=0.5)
+    parser.add_argument("--buffer_alpha", type=float, default=0.7)
     parsed, _ = parser.parse_known_args()
 
     node = AprilTagVisualizationNode(

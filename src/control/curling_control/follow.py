@@ -138,13 +138,13 @@ class NavigationWithAvoidanceNode(Node):
             self.get_logger().info("Target reached.")
             return
 
-        cmd.angular.z = 1.5 * heading_error
+        cmd.angular.z = 0.5 * heading_error
 
         # Slow down if obstacle repulsion is large
         repulse_mag = np.linalg.norm(repulse_sum)
         speed_scale = max(0.1, 1.0 - repulse_mag)
 
-        cmd.linear.x = 0.4 * speed_scale
+        cmd.linear.x = 0.1 * speed_scale
 
         self.cmd_pub.publish(cmd)
 

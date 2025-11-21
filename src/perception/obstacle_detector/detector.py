@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-OAK-D Rover Detector with Pose Publishing
-Detects black rovers and publishes their 3D pose with distance and angles
+OAK-D Rover Detector with Pose Publishing - COMPUTE OPTIMIZED
+Multi-scale detection with adaptive frequency and distance filtering
 """
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import Pose, Point, Quaternion
+from geometry_msgs.msg import Pose
 from perception_msgs.msg import ObjectPose, ObjectPoseArray
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import math
+import copy
 
 
 class RoverDetectorWithPose(Node):
@@ -21,37 +22,44 @@ class RoverDetectorWithPose(Node):
         self.bridge = CvBridge()
 
         # Declare parameters
-        self.declare_parameter('processing_scale', 0.5)
-        self.declare_parameter('display_scale', 1.0)
-        self.declare_parameter('processing_fps', 15.0)
+        self.declare_parameter('low_res_fps', 15.0)
+        self.declare_parameter('high_res_fps', 5.0)
         self.declare_parameter('min_rover_area', 200)
         self.declare_parameter('depth_roi_size', 10)
         self.declare_parameter('black_threshold', 60)
-        self.declare_parameter('publish_visualization', True)
+        self.declare_parameter('max_distance', 4.0)
+        self.declare_parameter('enable_buffer', True)
+        self.declare_parameter('buffer_max_age', 0.5)
+        self.declare_parameter('buffer_alpha', 0.7)
+        self.declare_parameter('no_gui', False)  # NEW: GUI control
         
         # Get parameters
-        self.processing_scale = self.get_parameter('processing_scale').value
-        self.display_scale = self.get_parameter('display_scale').value
-        self.processing_fps = self.get_parameter('processing_fps').value
+        self.low_res_fps = self.get_parameter('low_res_fps').value
+        self.high_res_fps = self.get_parameter('high_res_fps').value
         self.min_rover_area = self.get_parameter('min_rover_area').value
         self.depth_roi_size = self.get_parameter('depth_roi_size').value
         self.black_threshold = self.get_parameter('black_threshold').value
-        self.publish_visualization = self.get_parameter('publish_visualization').value
+        self.max_distance = self.get_parameter('max_distance').value
+        self.enable_buffer = self.get_parameter('enable_buffer').value
+        self.buffer_max_age = self.get_parameter('buffer_max_age').value
+        self.buffer_alpha = self.get_parameter('buffer_alpha').value
+        self.no_gui = self.get_parameter('no_gui').value
 
-        # Camera intrinsics (will be updated from camera_info)
-        self.fx = None  # Focal length X
-        self.fy = None  # Focal length Y
-        self.cx = None  # Principal point X
-        self.cy = None  # Principal point Y
+        # Camera intrinsics
+        self.fx = None
+        self.fy = None
+        self.cx = None
+        self.cy = None
         self.camera_info_received = False
 
-        self.current_rgb = None
+        self.current_rgb_msg = None
         self.current_depth = None
-        self.cached_display_image = None
+        self.cached_visualization = None  # Store for GUI display
         
-        # Rover tracking
+        # Detection state
+        self.current_detections = {}
+        self.rover_buffer = {}
         self.next_rover_id = 0
-        self.tracked_rovers = {}  # {id: last_center}
 
         # Subscribers
         self.create_subscription(Image, '/color/image', self.rgb_callback, 10)
@@ -60,33 +68,33 @@ class RoverDetectorWithPose(Node):
 
         # Publishers
         self.rover_pose_pub = self.create_publisher(ObjectPoseArray, '/detected_rovers', 10)
-        
-        if self.publish_visualization:
-            self.viz_pub = self.create_publisher(Image, '/rover_detection/visualization', 10)
+        self.viz_pub = self.create_publisher(Image, '/rover_detection/visualization', 10)
 
-        # Timers
-        processing_period = 1.0 / self.processing_fps
-        self.processing_timer = self.create_timer(processing_period, self.process_frame)
+        # Timers - dual frequency
+        low_res_period = 1.0 / self.low_res_fps
+        high_res_period = 1.0 / self.high_res_fps
         
-        if self.publish_visualization:
-            self.display_timer = self.create_timer(0.033, self.display_frame)
-
-        # Window (only if not publishing visualization)
-        if not self.publish_visualization:
+        self.low_res_timer = self.create_timer(low_res_period, self.process_low_res)
+        self.high_res_timer = self.create_timer(high_res_period, self.process_high_res)
+        
+        # GUI setup
+        if not self.no_gui:
             cv2.namedWindow("Rover Detection", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Rover Detection", 960, 540)
-        
-        self.frame_count = 0
+            # Display timer at 30 FPS
+            self.display_timer = self.create_timer(0.033, self.display_frame)
         
         self.get_logger().info("=" * 80)
-        self.get_logger().info("🤖 Rover Detector with Pose Publishing")
+        self.get_logger().info("🤖 OPTIMIZED Rover Detector with Multi-Scale Detection")
         self.get_logger().info("=" * 80)
-        self.get_logger().info(f"Publishing to: /detected_rovers")
-        self.get_logger().info(f"Visualization: {'Enabled' if self.publish_visualization else 'Disabled'}")
+        self.get_logger().info(f"Low-res tracking: {self.low_res_fps} Hz @ 320px")
+        self.get_logger().info(f"High-res pose: {self.high_res_fps} Hz @ 640px")
+        self.get_logger().info(f"Max distance: {self.max_distance}m")
+        self.get_logger().info(f"Buffering: {'Enabled' if self.enable_buffer else 'Disabled'}")
+        self.get_logger().info(f"GUI: {'Disabled' if self.no_gui else 'Enabled'}")
         self.get_logger().info("=" * 80)
 
     def camera_info_callback(self, msg: CameraInfo):
-        """Extract camera intrinsics for 3D pose calculation"""
         if not self.camera_info_received:
             K = np.array(msg.k).reshape(3, 3)
             self.fx = K[0, 0]
@@ -94,82 +102,46 @@ class RoverDetectorWithPose(Node):
             self.cx = K[0, 2]
             self.cy = K[1, 2]
             self.camera_info_received = True
-            
-            self.get_logger().info(f"Camera intrinsics received:")
-            self.get_logger().info(f"  fx={self.fx:.2f}, fy={self.fy:.2f}")
-            self.get_logger().info(f"  cx={self.cx:.2f}, cy={self.cy:.2f}")
+            self.get_logger().info(f"Camera intrinsics: fx={self.fx:.1f}, fy={self.fy:.1f}")
 
     def rgb_callback(self, msg):
-        try:
-            self.current_rgb = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-        except Exception as e:
-            self.get_logger().error(f"RGB callback error: {e}")
+        self.current_rgb_msg = msg
 
     def depth_callback(self, msg):
         try:
             self.current_depth = np.frombuffer(msg.data, dtype=np.uint16).reshape(
                 msg.height, msg.width)
         except Exception as e:
-            self.get_logger().error(f"Depth callback error: {e}")
+            self.get_logger().error(f"Depth error: {e}")
 
     def pixel_to_3d_point(self, u, v, depth_mm):
-        """
-        Convert pixel coordinates + depth to 3D point in camera frame
-        
-        Args:
-            u, v: Pixel coordinates
-            depth_mm: Depth in millimeters
-            
-        Returns:
-            (x, y, z) in meters in camera frame
-            z: forward, x: right, y: down
-        """
+        """Convert pixel + depth to 3D point"""
         if not self.camera_info_received or depth_mm == 0:
             return None
         
-        z = depth_mm / 1000.0  # Convert mm to meters
+        z = depth_mm / 1000.0
         x = (u - self.cx) * z / self.fx
         y = (v - self.cy) * z / self.fy
         
         return (x, y, z)
 
     def calculate_angles(self, u, v):
-        """
-        Calculate horizontal and vertical angles from camera center
-        
-        Args:
-            u, v: Pixel coordinates
-            
-        Returns:
-            (angle_h, angle_v) in radians
-            Positive angle_h = right
-            Positive angle_v = up
-        """
+        """Calculate horizontal/vertical angles from center"""
         if not self.camera_info_received:
             return (0.0, 0.0)
         
-        # Angle from optical axis
         angle_h = math.atan((u - self.cx) / self.fx)
         angle_v = math.atan((v - self.cy) / self.fy)
         
-        return (angle_h, -angle_v)  # Negate vertical because image Y is down
+        return (angle_h, -angle_v)
 
     def assign_rover_id(self, center, distance):
-        """
-        Assign persistent ID to rovers using simple nearest-neighbor tracking
-        
-        Args:
-            center: (x, y) pixel coordinates
-            distance: Distance in meters
-            
-        Returns:
-            rover_id: Unique integer ID
-        """
-        # Match to existing rover if close enough (50 pixels)
+        """Assign persistent ID using nearest-neighbor tracking"""
         best_id = None
         best_dist = float('inf')
         
-        for rover_id, last_center in list(self.tracked_rovers.items()):
+        for rover_id, buffer_data in self.rover_buffer.items():
+            last_center = (buffer_data['rover'].center_x, buffer_data['rover'].center_y)
             dx = center[0] - last_center[0]
             dy = center[1] - last_center[1]
             pixel_dist = math.sqrt(dx**2 + dy**2)
@@ -179,256 +151,305 @@ class RoverDetectorWithPose(Node):
                 best_id = rover_id
         
         if best_id is not None:
-            # Update existing rover
-            self.tracked_rovers[best_id] = center
             return best_id
         else:
-            # Create new rover
             new_id = self.next_rover_id
             self.next_rover_id += 1
-            self.tracked_rovers[new_id] = center
             return new_id
 
-    def create_depth_overlay(self, depth_image, mask):
-        """Create colored depth visualization for detected pixels only"""
-        depth_normalized = depth_image.astype(np.float32) / 1000.0
-        depth_normalized = np.clip(depth_normalized / 5.0 * 255, 0, 255).astype(np.uint8)
-        depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
-        overlay = np.zeros_like(depth_colored)
-        overlay[mask > 0] = depth_colored[mask > 0]
-        return overlay
-
-    def process_frame(self):
-        """Main processing loop"""
-        if self.current_rgb is None or self.current_depth is None:
-            return
+    def detect_at_resolution(self, target_width):
+        """Run rover detection at specified resolution"""
+        if self.current_rgb_msg is None or self.current_depth is None:
+            return []
         
         if not self.camera_info_received:
-            self.get_logger().warn("Waiting for camera info...", throttle_duration_sec=5.0)
-            return
-
-        self.frame_count += 1
-
-        # ===== DOWNSCALE FOR PROCESSING =====
-        rgb_full = self.current_rgb.copy()
-        depth_full = self.current_depth.copy()
+            return []
         
-        if self.processing_scale != 1.0:
-            proc_height = int(rgb_full.shape[0] * self.processing_scale)
-            proc_width = int(rgb_full.shape[1] * self.processing_scale)
-            rgb_proc = cv2.resize(rgb_full, (proc_width, proc_height), 
-                                 interpolation=cv2.INTER_AREA)
-            depth_proc = cv2.resize(depth_full, (proc_width, proc_height), 
-                                   interpolation=cv2.INTER_NEAREST)
-        else:
-            rgb_proc = rgb_full
-            depth_proc = depth_full
-
-        # ===== ROVER DETECTION =====
-        hsv = cv2.cvtColor(rgb_proc, cv2.COLOR_BGR2HSV)
-        lower_black = np.array([0, 0, 0])
-        upper_black = np.array([180, 255, self.black_threshold])
-        mask = cv2.inRange(hsv, lower_black, upper_black)
-
-        kernel_size = max(3, int(5 * self.processing_scale))
-        kernel = np.ones((kernel_size, kernel_size), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-
-        # ===== FIND CONTOURS =====
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        detected_rovers = []
-        
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < self.min_rover_area:
-                continue
+        try:
+            rgb_full = self.bridge.imgmsg_to_cv2(self.current_rgb_msg, 'bgr8')
+            depth_full = self.current_depth
             
-            x, y, w, h = cv2.boundingRect(contour)
-            cx = x + w // 2
-            cy = y + h // 2
+            scale_factor = target_width / rgb_full.shape[1]
+            new_height = int(rgb_full.shape[0] * scale_factor)
             
-            if 0 <= cy < depth_proc.shape[0] and 0 <= cx < depth_proc.shape[1]:
-                # Get average depth in ROI
-                roi_size = int(self.depth_roi_size * self.processing_scale)
+            rgb_scaled = cv2.resize(rgb_full, (target_width, new_height), 
+                                   interpolation=cv2.INTER_LINEAR)
+            depth_scaled = cv2.resize(depth_full, (target_width, new_height), 
+                                     interpolation=cv2.INTER_NEAREST)
+            
+            # Black detection
+            hsv = cv2.cvtColor(rgb_scaled, cv2.COLOR_BGR2HSV)
+            lower_black = np.array([0, 0, 0])
+            upper_black = np.array([180, 255, self.black_threshold])
+            mask = cv2.inRange(hsv, lower_black, upper_black)
+            
+            # Morphology
+            kernel_size = max(3, int(5 * scale_factor))
+            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            
+            # Find contours
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            detections = []
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < self.min_rover_area * (scale_factor ** 2):
+                    continue
+                
+                x, y, w, h = cv2.boundingRect(contour)
+                cx = x + w // 2
+                cy = y + h // 2
+                
+                # Get depth
+                roi_size = int(self.depth_roi_size * scale_factor)
                 roi_y1 = max(0, cy - roi_size)
-                roi_y2 = min(depth_proc.shape[0], cy + roi_size)
+                roi_y2 = min(depth_scaled.shape[0], cy + roi_size)
                 roi_x1 = max(0, cx - roi_size)
-                roi_x2 = min(depth_proc.shape[1], cx + roi_size)
-                depth_roi = depth_proc[roi_y1:roi_y2, roi_x1:roi_x2]
+                roi_x2 = min(depth_scaled.shape[1], cx + roi_size)
+                depth_roi = depth_scaled[roi_y1:roi_y2, roi_x1:roi_x2]
                 valid_depths = depth_roi[depth_roi > 0]
                 
-                if len(valid_depths) > 0:
-                    avg_depth_mm = np.mean(valid_depths)
-                    
-                    # Scale coordinates back to full resolution
-                    scale_factor = 1.0 / self.processing_scale
-                    cx_full = int(cx * scale_factor)
-                    cy_full = int(cy * scale_factor)
-                    x_full = int(x * scale_factor)
-                    y_full = int(y * scale_factor)
-                    w_full = int(w * scale_factor)
-                    h_full = int(h * scale_factor)
-                    
-                    # Calculate 3D position
-                    point_3d = self.pixel_to_3d_point(cx_full, cy_full, avg_depth_mm)
-                    
-                    if point_3d is not None:
-                        # Calculate angles
-                        angle_h, angle_v = self.calculate_angles(cx_full, cy_full)
-                        
-                        # Calculate Euclidean distance
-                        x_3d, y_3d, z_3d = point_3d
-                        distance = math.sqrt(x_3d**2 + y_3d**2 + z_3d**2)
-                        
-                        # Assign persistent ID
-                        rover_id = self.assign_rover_id((cx_full, cy_full), distance)
-                        
-                        detected_rovers.append({
-                            'id': rover_id,
-                            'bbox': (x_full, y_full, w_full, h_full),
-                            'center': (cx_full, cy_full),
-                            'point_3d': point_3d,
-                            'distance': distance,
-                            'angle_h': angle_h,
-                            'angle_v': angle_v,
-                            'area': area * (scale_factor ** 2),
-                            'confidence': min(1.0, area / 5000.0)  # Simple confidence based on size
-                        })
-
-        # ===== PUBLISH ROVER POSES =====
-        rover_array_msg = ObjectPoseArray()
-        rover_array_msg.header.stamp = self.get_clock().now().to_msg()
-        rover_array_msg.header.frame_id = "oak_rgb_camera_optical_frame"
-        
-        for rover in detected_rovers:
-            rover_msg = ObjectPose()
-            rover_msg.id = rover['id']
+                if len(valid_depths) == 0:
+                    continue
+                
+                avg_depth_mm = np.median(valid_depths)
+                
+                # Scale back to full resolution
+                inv_scale = 1.0 / scale_factor
+                cx_full = int(cx * inv_scale)
+                cy_full = int(cy * inv_scale)
+                x_full = int(x * inv_scale)
+                y_full = int(y * inv_scale)
+                w_full = int(w * inv_scale)
+                h_full = int(h * inv_scale)
+                
+                # Calculate 3D position
+                point_3d = self.pixel_to_3d_point(cx_full, cy_full, avg_depth_mm)
+                
+                if point_3d is None:
+                    continue
+                
+                x_3d, y_3d, z_3d = point_3d
+                distance = math.sqrt(x_3d**2 + y_3d**2 + z_3d**2)
+                
+                # Distance filter
+                if distance > self.max_distance:
+                    continue
+                
+                angle_h, angle_v = self.calculate_angles(cx_full, cy_full)
+                
+                detections.append({
+                    'bbox': (x_full, y_full, w_full, h_full),
+                    'center': (cx_full, cy_full),
+                    'point_3d': point_3d,
+                    'distance': distance,
+                    'angle_h': angle_h,
+                    'angle_v': angle_v,
+                    'area': area * (inv_scale ** 2),
+                    'resolution': target_width
+                })
             
-            # Pose in camera frame
+            return detections
+            
+        except Exception as e:
+            self.get_logger().error(f"Detection error: {e}")
+            return []
+
+    def process_low_res(self):
+        """Fast low-res detection for tracking"""
+        detections = self.detect_at_resolution(320)
+        
+        for det in detections:
+            pos_hash = (int(det['center'][0] / 50), int(det['center'][1] / 50))
+            
+            if pos_hash not in self.current_detections:
+                self.current_detections[pos_hash] = {
+                    'detection': det,
+                    'source': 'low_res'
+                }
+
+    def process_high_res(self):
+        """High-res detection with pose calculation and publishing"""
+        detections = self.detect_at_resolution(640)
+        
+        # Override with high-res detections
+        for det in detections:
+            pos_hash = (int(det['center'][0] / 50), int(det['center'][1] / 50))
+            self.current_detections[pos_hash] = {
+                'detection': det,
+                'source': 'high_res'
+            }
+        
+        # Process and publish
+        self._calculate_and_publish_poses()
+        
+        # Clear for next cycle
+        self.current_detections.clear()
+
+    def _calculate_and_publish_poses(self):
+        """Calculate poses, apply buffering, and publish"""
+        now = self.get_clock().now().nanoseconds / 1e9
+        current_frame_ids = set()
+        
+        # Process detections
+        for pos_hash, data in self.current_detections.items():
+            det = data['detection']
+            
+            rover_id = self.assign_rover_id(det['center'], det['distance'])
+            
+            rover_msg = ObjectPose()
+            rover_msg.id = rover_id
+            
             pose = Pose()
-            pose.position.x = float(rover['point_3d'][0])
-            pose.position.y = float(rover['point_3d'][1])
-            pose.position.z = float(rover['point_3d'][2])
-            pose.orientation.w = 1.0  # No orientation estimation
+            pose.position.x = float(det['point_3d'][0])
+            pose.position.y = float(det['point_3d'][1])
+            pose.position.z = float(det['point_3d'][2])
+            pose.orientation.w = 1.0
             rover_msg.pose = pose
             
-            # Distance and angles
-            rover_msg.distance = float(rover['distance'])
-            rover_msg.angle_horizontal = float(rover['angle_h'])
-            rover_msg.angle_vertical = float(rover['angle_v'])
+            rover_msg.distance = float(det['distance'])
+            rover_msg.angle_horizontal = float(det['angle_h'])
+            rover_msg.angle_vertical = float(det['angle_v'])
             
-            # Pixel coordinates
-            x, y, w, h = rover['bbox']
-            rover_msg.center_x = float(rover['center'][0])
-            rover_msg.center_y = float(rover['center'][1])
+            x, y, w, h = det['bbox']
+            rover_msg.center_x = float(det['center'][0])
+            rover_msg.center_y = float(det['center'][1])
             rover_msg.bbox_x_min = float(x)
             rover_msg.bbox_y_min = float(y)
             rover_msg.bbox_x_max = float(x + w)
             rover_msg.bbox_y_max = float(y + h)
+            rover_msg.area = float(det['area'])
+            rover_msg.confidence = min(1.0, det['area'] / 5000.0)
             
-            # Additional info
-            rover_msg.confidence = float(rover['confidence'])
-            rover_msg.area = float(rover['area'])
+            # Buffering
+            if self.enable_buffer and rover_id in self.rover_buffer:
+                prev_rover = self.rover_buffer[rover_id]['rover']
+                
+                rover_msg.distance = (
+                    self.buffer_alpha * rover_msg.distance +
+                    (1.0 - self.buffer_alpha) * prev_rover.distance
+                )
+                
+                rover_msg.pose.position.x = (
+                    self.buffer_alpha * rover_msg.pose.position.x +
+                    (1.0 - self.buffer_alpha) * prev_rover.pose.position.x
+                )
+                rover_msg.pose.position.y = (
+                    self.buffer_alpha * rover_msg.pose.position.y +
+                    (1.0 - self.buffer_alpha) * prev_rover.pose.position.y
+                )
+                rover_msg.pose.position.z = (
+                    self.buffer_alpha * rover_msg.pose.position.z +
+                    (1.0 - self.buffer_alpha) * prev_rover.pose.position.z
+                )
             
-            rover_array_msg.rovers.append(rover_msg)
+            self.rover_buffer[rover_id] = {
+                'rover': copy.deepcopy(rover_msg),
+                'last_seen': now
+            }
             
-            # Log with detailed info
-            angle_h_deg = math.degrees(rover['angle_h'])
-            angle_v_deg = math.degrees(rover['angle_v'])
+            current_frame_ids.add(rover_id)
+        
+        # Remove stale rovers
+        ids_to_remove = [rid for rid, data in self.rover_buffer.items() 
+                        if (now - data['last_seen']) > self.buffer_max_age]
+        for rid in ids_to_remove:
+            del self.rover_buffer[rid]
+            self.get_logger().info(f"Rover {rid} timed out")
+        
+        # Build message
+        rover_array_msg = ObjectPoseArray()
+        rover_array_msg.header.stamp = self.get_clock().now().to_msg()
+        rover_array_msg.header.frame_id = "oak_rgb_camera_optical_frame"
+        
+        if self.enable_buffer:
+            for rover_id, buffer_data in self.rover_buffer.items():
+                rover_array_msg.rovers.append(buffer_data['rover'])
+        else:
+            for rover_id in current_frame_ids:
+                if rover_id in self.rover_buffer:
+                    rover_array_msg.rovers.append(self.rover_buffer[rover_id]['rover'])
+        
+        self.rover_pose_pub.publish(rover_array_msg)
+        
+        # Log
+        for rover in rover_array_msg.rovers:
+            angle_deg = math.degrees(rover.angle_horizontal)
             self.get_logger().info(
-                f"Rover {rover['id']}: {rover['distance']:.2f}m "
-                f"at ({angle_h_deg:+.1f}°, {angle_v_deg:+.1f}°) "
-                f"[x={rover['point_3d'][0]:+.2f}, y={rover['point_3d'][1]:+.2f}, z={rover['point_3d'][2]:.2f}]",
+                f"Rover {rover.id}: {rover.distance:.2f}m @ {angle_deg:+.1f}° "
+                f"[{rover.pose.position.x:+.2f}, {rover.pose.position.y:+.2f}, {rover.pose.position.z:.2f}]",
                 throttle_duration_sec=1.0
             )
         
-        self.rover_pose_pub.publish(rover_array_msg)
+        # Create and cache visualization
+        self._create_visualization(rover_array_msg)
 
-        # ===== CREATE VISUALIZATION =====
-        if self.processing_scale != 1.0:
-            mask_full = cv2.resize(mask, (rgb_full.shape[1], rgb_full.shape[0]), 
-                                  interpolation=cv2.INTER_NEAREST)
-        else:
-            mask_full = mask
-        
-        depth_overlay = self.create_depth_overlay(depth_full, mask_full)
-        alpha = 0.5
-        rgb_with_depth = cv2.addWeighted(rgb_full, 1 - alpha, depth_overlay, alpha, 0)
-        
-        # Draw detections
-        for rover in detected_rovers:
-            x, y, w, h = rover['bbox']
-            cx, cy = rover['center']
-            
-            # Bounding box
-            cv2.rectangle(rgb_with_depth, (x, y), (x + w, y + h), (0, 0, 255), 3)
-            
-            # Center crosshair
-            cross_size = 15
-            cv2.line(rgb_with_depth, (cx - cross_size, cy), (cx + cross_size, cy), 
-                    (0, 255, 255), 2)
-            cv2.line(rgb_with_depth, (cx, cy - cross_size), (cx, cy + cross_size), 
-                    (0, 255, 255), 2)
-            cv2.circle(rgb_with_depth, (cx, cy), 5, (0, 255, 255), -1)
-            
-            # Label with distance and angle
-            angle_h_deg = math.degrees(rover['angle_h'])
-            label = f"Rover {rover['id']}: {rover['distance']:.2f}m @ {angle_h_deg:+.1f}°"
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.6
-            thickness = 2
-            
-            (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, thickness)
-            
-            label_x = x
-            label_y = y - 15
-            if label_y < text_h + 10:
-                label_y = y + h + text_h + 10
-            
-            cv2.rectangle(rgb_with_depth, 
-                         (label_x, label_y - text_h - 5),
-                         (label_x + text_w + 10, label_y + 5),
-                         (0, 0, 0), -1)
-            cv2.putText(rgb_with_depth, label, (label_x + 5, label_y),
-                       font, font_scale, (0, 0, 255), thickness)
-        
-        # Info overlay
-        info_y = 30
-        cv2.putText(rgb_with_depth, f"Rovers: {len(detected_rovers)}", 
-                   (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        
-        # Downscale for display
-        if self.display_scale != 1.0:
-            disp_height = int(rgb_with_depth.shape[0] * self.display_scale)
-            disp_width = int(rgb_with_depth.shape[1] * self.display_scale)
-            rgb_with_depth = cv2.resize(rgb_with_depth, (disp_width, disp_height),
-                                       interpolation=cv2.INTER_AREA)
-        
-        self.cached_display_image = rgb_with_depth
-        
-        # Publish visualization
-        if self.publish_visualization:
-            try:
-                viz_msg = self.bridge.cv2_to_imgmsg(rgb_with_depth, encoding='bgr8')
-                viz_msg.header.stamp = rover_array_msg.header.stamp
-                viz_msg.header.frame_id = rover_array_msg.header.frame_id
-                self.viz_pub.publish(viz_msg)
-            except Exception as e:
-                self.get_logger().error(f"Visualization publish error: {e}")
-
-    def display_frame(self):
-        """Display cached result"""
-        if self.cached_display_image is None:
-            blank = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(blank, "Waiting for camera data...", 
-                       (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            cv2.imshow("Rover Detection", blank)
-            cv2.waitKey(1)
+    def _create_visualization(self, rover_array_msg):
+        """Create visualization and cache for GUI/publishing"""
+        if self.current_rgb_msg is None:
             return
         
-        cv2.imshow("Rover Detection", self.cached_display_image)
+        try:
+            rgb_full = self.bridge.imgmsg_to_cv2(self.current_rgb_msg, 'bgr8')
+            viz = rgb_full.copy()
+            
+            for rover in rover_array_msg.rovers:
+                x_min = int(rover.bbox_x_min)
+                y_min = int(rover.bbox_y_min)
+                x_max = int(rover.bbox_x_max)
+                y_max = int(rover.bbox_y_max)
+                cx = int(rover.center_x)
+                cy = int(rover.center_y)
+                
+                # Bounding box (thick red)
+                cv2.rectangle(viz, (x_min, y_min), (x_max, y_max), (0, 0, 255), 3)
+                
+                # Crosshair (cyan)
+                cv2.line(viz, (cx - 15, cy), (cx + 15, cy), (255, 255, 0), 2)
+                cv2.line(viz, (cx, cy - 15), (cx, cy + 15), (255, 255, 0), 2)
+                cv2.circle(viz, (cx, cy), 5, (255, 255, 0), -1)
+                
+                # Label with background
+                angle_deg = math.degrees(rover.angle_horizontal)
+                label = f"Rover {rover.id}: {rover.distance:.2f}m @ {angle_deg:+.1f} deg"
+                
+                (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                
+                cv2.rectangle(viz, (x_min, y_min - 30), (x_min + text_w + 10, y_min), (0, 0, 0), -1)
+                cv2.putText(viz, label, (x_min + 5, y_min - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            # Info overlay
+            cv2.putText(viz, f"Rovers: {len(rover_array_msg.rovers)}", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(viz, f"Max dist: {self.max_distance}m", 
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # Cache for GUI
+            self.cached_visualization = viz
+            
+            # Publish
+            viz_msg = self.bridge.cv2_to_imgmsg(viz, encoding='bgr8')
+            viz_msg.header = rover_array_msg.header
+            self.viz_pub.publish(viz_msg)
+            
+        except Exception as e:
+            self.get_logger().error(f"Viz error: {e}")
+
+    def display_frame(self):
+        """Display cached visualization in GUI window"""
+        if self.cached_visualization is None:
+            # Show waiting message
+            blank = np.zeros((540, 960, 3), dtype=np.uint8)
+            cv2.putText(blank, "Waiting for camera data...", 
+                       (200, 270), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.imshow("Rover Detection", blank)
+        else:
+            cv2.imshow("Rover Detection", self.cached_visualization)
+        
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             raise KeyboardInterrupt
@@ -436,7 +457,30 @@ class RoverDetectorWithPose(Node):
 
 def main(args=None):
     rclpy.init(args=args)
+    
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--low_res_fps", type=float, default=15.0)
+    parser.add_argument("--high_res_fps", type=float, default=5.0)
+    parser.add_argument("--max_distance", type=float, default=4.0)
+    parser.add_argument("--enable_buffer", action="store_true")
+    parser.add_argument("--buffer_alpha", type=float, default=0.7)
+    parser.add_argument("--no_gui", action="store_true", help="Disable GUI window")
+    parsed, _ = parser.parse_known_args()
+    
     node = RoverDetectorWithPose()
+    
+    from rclpy.parameter import Parameter
+    params = [
+        Parameter('low_res_fps', Parameter.Type.DOUBLE, parsed.low_res_fps),
+        Parameter('high_res_fps', Parameter.Type.DOUBLE, parsed.high_res_fps),
+        Parameter('max_distance', Parameter.Type.DOUBLE, parsed.max_distance),
+        Parameter('enable_buffer', Parameter.Type.BOOL, parsed.enable_buffer),
+        Parameter('buffer_alpha', Parameter.Type.DOUBLE, parsed.buffer_alpha),
+        Parameter('no_gui', Parameter.Type.BOOL, parsed.no_gui),
+    ]
+    node.set_parameters(params)
+    
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

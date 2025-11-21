@@ -237,7 +237,7 @@ class FieldVisualizationNode(Node):
         self.latest_vector = None
         self.vector_sub = self.create_subscription(
             Vector3,
-            "/nav/steering_vector",
+            "/control/heading_vector",
             self.vector_callback,
             10
         )

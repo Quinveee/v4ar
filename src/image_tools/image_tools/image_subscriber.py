@@ -57,16 +57,17 @@ class ImageSubscriber(Node):
         self.map1_oak = None
         self.map2_oak = None
         self.new_K_oak = None
-        
+
         self.image_pub = self.create_publisher(Image, "processed_image", 10)
-        self.oak_image_pub = self.create_publisher(Image, "/color/rect_image", 10)
+        self.oak_image_pub = self.create_publisher(
+            Image, "/color/rect_image", 10)
 
         topics = [t[0] for t in self.get_topic_names_and_types()]
-        
+
         oak_color_topic = '/color/image'
         oak_color_compressed = '/color/image/compressed'
         oak_info_topic = '/color/camera_info'
-        
+
         if oak_info_topic in topics:
             self.oak_info_sub = self.create_subscription(
                 CameraInfo,
@@ -74,8 +75,9 @@ class ImageSubscriber(Node):
                 self.oak_camera_info_callback,
                 10
             )
-            self.get_logger().info(f"Subscribed to OAK CameraInfo: {oak_info_topic}")
-            
+            self.get_logger().info(
+                f"Subscribed to OAK CameraInfo: {oak_info_topic}")
+
             if oak_color_compressed in topics:
                 self.oak_use_compressed = True
                 self.oak_sub = self.create_subscription(
@@ -84,7 +86,8 @@ class ImageSubscriber(Node):
                     self.oak_callback,
                     10
                 )
-                self.get_logger().info(f"Subscribed to OAK image: {oak_color_compressed}")
+                self.get_logger().info(
+                    f"Subscribed to OAK image: {oak_color_compressed}")
             elif oak_color_topic in topics:
                 self.oak_use_compressed = False
                 self.oak_sub = self.create_subscription(
@@ -93,7 +96,8 @@ class ImageSubscriber(Node):
                     self.oak_callback,
                     10
                 )
-                self.get_logger().info(f"Subscribed to OAK image: {oak_color_topic}")
+                self.get_logger().info(
+                    f"Subscribed to OAK image: {oak_color_topic}")
             else:
                 self.get_logger().warn("No OAK color image topic found")
         else:
@@ -105,8 +109,10 @@ class ImageSubscriber(Node):
         )
 
         if self.record_path:
-            os.makedirs(os.path.dirname(self.record_path) or ".", exist_ok=True)
-            self.get_logger().info(f"Recording enabled, saving to: {self.record_path}")
+            os.makedirs(os.path.dirname(self.record_path)
+                        or ".", exist_ok=True)
+            self.get_logger().info(
+                f"Recording enabled, saving to: {self.record_path}")
         else:
             self.get_logger().info("Running without video recording.")
 
@@ -129,7 +135,7 @@ class ImageSubscriber(Node):
     def oak_callback(self, data):
         if self.map1_oak is None or self.map2_oak is None:
             return
-        
+
         try:
             if self.oak_use_compressed:
                 np_arr = np.frombuffer(data.data, np.uint8)
@@ -137,11 +143,12 @@ class ImageSubscriber(Node):
             else:
                 raw_oak = self.br.imgmsg_to_cv2(data, 'bgr8')
 
-            rect_oak = cv2.remap(raw_oak, self.map1_oak, self.map2_oak, cv2.INTER_LINEAR)
-            
+            rect_oak = cv2.remap(raw_oak, self.map1_oak,
+                                 self.map2_oak, cv2.INTER_LINEAR)
+
             self.oak_image_pub.publish(
                 self.br.cv2_to_imgmsg(rect_oak, encoding='bgr8'))
-            
+
         except Exception as e:
             self.get_logger().error(f"Error processing OAK frame: {e}")
 
@@ -156,14 +163,15 @@ class ImageSubscriber(Node):
                 np_arr = np.frombuffer(data.data, np.uint8)
                 current_frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             elif not self.use_compressed and not self.custom_rect:
-                current_frame = self.br.imgmsg_to_cv2(data)
+                current_frame = self.br.imgmsg_to_cv2(
+                    data, desired_encoding='bgr8')
             elif self.custom_rect:
                 if self.use_compressed:
                     np_arr = np.frombuffer(data.data, np.uint8)
                     raw = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
                 else:
-                    raw = self.br.imgmsg_to_cv2(data, 'bgr8')
-                
+                    raw = self.br.imgmsg_to_cv2(data, desired_encoding='bgr8')
+
                 h, w = raw.shape[:2]
 
                 if self.map1_custom is None or self.map2_custom is None:
@@ -174,9 +182,11 @@ class ImageSubscriber(Node):
                             self.K, self.D, (w, h), 0.0, (w, h)
                         )
                     self.map1_custom, self.map2_custom = cv2.initUndistortRectifyMap(
-                        self.K, self.D, None, self.new_K_custom, (w, h), cv2.CV_32FC1
+                        self.K, self.D, None, self.new_K_custom, (
+                            w, h), cv2.CV_32FC1
                     )
-                current_frame = cv2.remap(raw, self.map1_custom, self.map2_custom, cv2.INTER_LINEAR)
+                current_frame = cv2.remap(
+                    raw, self.map1_custom, self.map2_custom, cv2.INTER_LINEAR)
 
             if current_frame is not None and self.display_window:
                 cv2.imshow("camera", current_frame)
