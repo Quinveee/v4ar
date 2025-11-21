@@ -7,10 +7,10 @@ package_name = 'control'
 setup(
     name=package_name,
     version='0.0.0',
-    packages=find_packages(include=['marker_gaze', "*marker_gaze*",'line_follower', 'launch', 'config',
+    packages=find_packages(include=['marker_gaze', "*marker_gaze*", 'line_follower', 'launch', 'config',
                                     "curling_control", "*curling_control*", "marker_gaze.gaze_strategies",
-                                    "curling_control.curling_strategies"]
-),
+                                    "curling_control.curling_strategies", "telecontrol", "*telecontrol*"]
+                           ),
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -33,6 +33,8 @@ setup(
         'console_scripts': [
             'line_follower = line_follower.line_follower:main',
             'marker_gaze = marker_gaze.marker_gaze:main',
+            'teleop = telecontrol.teleop_gui:main',
+            'follow = curling_control.follow:main',
         ],
     },
 )

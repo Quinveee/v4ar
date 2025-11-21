@@ -6,7 +6,7 @@ class WeightedLeastSquaresSolver(BaseTriangulationSolver):
     def __init__(self, weight_power=2.0):
         self.weight_power = weight_power
 
-    def solve(self, detections, marker_map):
+    def solve(self, detections, marker_map, *args, **kwargs):
         ref_id, ref_d = detections[0]
         x1, y1 = marker_map[ref_id]
 

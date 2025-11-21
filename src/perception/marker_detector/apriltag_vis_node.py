@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 
+import copy
+from typing import Dict
+
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.time import Time
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Pose
 from cv_bridge import CvBridge
@@ -14,6 +18,7 @@ from datetime import datetime
 # your rover's apriltag library
 from apriltag import apriltag
 from perception_msgs.msg import MarkerPoseArray, MarkerPose
+from rcl_interfaces.msg import SetParametersResult
 
 
 def rotation_matrix_to_quaternion(R: np.ndarray):
@@ -94,6 +99,21 @@ class AprilTagVisualizationNode(Node):
         self.declare_parameter('image_topic', '/image_raw')
         self.declare_parameter('output_dir', output_dir)
         self.declare_parameter('use_raw', False)
+
+        # NEW: buffer-related parameters
+        self.declare_parameter('enable_buffer', False)
+        self.declare_parameter('buffer_max_age_sec', 0.3)
+        self.declare_parameter('buffer_distance_alpha', 0.6)
+
+        # NEW: multiscale-related parameters
+        self.declare_parameter('enable_multiscale', False)
+        # Comma-separated list of scales, e.g. "0.7,1.0,1.4"
+        self.declare_parameter('multiscale_scales', '1.0')
+
+        # NEW: visualization-related parameters
+        self.declare_parameter('enable_gui', False)
+        self.declare_parameter('publish_debug_image', False)
+
         use_raw = self.get_parameter('use_raw').value
 
         if use_raw:
@@ -151,6 +171,64 @@ class AprilTagVisualizationNode(Node):
             MarkerPoseArray, '/detected_markers', 10
         )
 
+        # --- NEW: internal state for buffering ---
+        self.enable_buffer = self.get_parameter('enable_buffer').value
+        self.buffer_max_age_sec = self.get_parameter('buffer_max_age_sec').value
+        self.buffer_distance_alpha = self.get_parameter('buffer_distance_alpha').value
+
+        # --- NEW: multiscale config ---
+        self.enable_multiscale = self.get_parameter('enable_multiscale').value
+        multiscale_str = self.get_parameter('multiscale_scales').value
+        self.multiscale_scales = self._parse_multiscale_scales(multiscale_str)
+
+        # --- NEW: visualization flags ---
+        self.enable_gui = self.get_parameter('enable_gui').value
+        self.publish_debug_image = self.get_parameter('publish_debug_image').value
+
+        # Optional debug image publisher
+        self.debug_pub = None
+        if self.publish_debug_image:
+            self.debug_pub = self.create_publisher(
+                Image,
+                '/apriltag/detected_image',
+                10
+            )
+
+        # Setup GUI windows if requested
+        if self.enable_gui:
+            cv2.namedWindow("AprilTag Original", cv2.WINDOW_NORMAL)
+            cv2.namedWindow("AprilTag Detected", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("AprilTag Original", 640, 480)
+            cv2.resizeWindow("AprilTag Detected", 640, 480)
+
+        # id -> {"marker": MarkerPose, "last_seen": Time}
+        self.marker_state: Dict[int, Dict[str, object]] = {}
+
+        if self.enable_buffer:
+            self.get_logger().info(
+                f"Marker buffering ENABLED: max_age_sec={self.buffer_max_age_sec:.2f}, "
+                f"distance_alpha={self.buffer_distance_alpha:.2f}"
+            )
+        else:
+            self.get_logger().info("Marker buffering DISABLED (publishing raw detections).")
+
+        if self.enable_multiscale:
+            self.get_logger().info(
+                f"Multiscale detection ENABLED. Scales={self.multiscale_scales}"
+            )
+        else:
+            self.get_logger().info("Multiscale detection DISABLED (using single scale).")
+
+        if self.enable_gui:
+            self.get_logger().info("OpenCV GUI visualization ENABLED.")
+        else:
+            self.get_logger().info("OpenCV GUI visualization DISABLED.")
+
+        if self.publish_debug_image:
+            self.get_logger().info("Debug detected image topic PUBLISHED on /apriltag/detected_image.")
+        else:
+            self.get_logger().info("Debug detected image topic DISABLED.")
+
     # ------------------------------------------------------------------ #
     # Utilities
     # ------------------------------------------------------------------ #
@@ -174,6 +252,185 @@ class AprilTagVisualizationNode(Node):
         cv2.imwrite(f2, self.current_detected)
 
         self.get_logger().info(f"Saved screenshots:\n  {f1}\n  {f2}")
+
+    def _parse_multiscale_scales(self, s: str):
+        """
+        Parse a comma-separated list of scales into a list of floats.
+
+        Example:
+            "0.7,1.0,1.4" -> [0.7, 1.0, 1.4]
+
+        Guarantees at least [1.0] if parsing fails.
+        """
+        try:
+            parts = [p.strip() for p in s.split(',') if p.strip()]
+            scales = [float(p) for p in parts]
+            if not scales:
+                return [1.0]
+            # Remove any non-positive or absurd scales
+            scales = [sc for sc in scales if sc > 0.05]
+            return scales or [1.0]
+        except Exception as e:
+            self.get_logger().warn(f"Failed to parse multiscale_scales '{s}': {e}")
+            return [1.0]
+
+    def _apply_visualization_settings(self):
+        """
+        Create/destroy OpenCV windows and debug publisher according to
+        the current parameters. Safe to call multiple times.
+        """
+        # Read current parameter values (use get_parameter to reflect runtime changes)
+        try:
+            enable_gui = self.get_parameter('enable_gui').value
+        except Exception:
+            enable_gui = bool(getattr(self, 'enable_gui', False))
+
+        try:
+            publish_debug = self.get_parameter('publish_debug_image').value
+        except Exception:
+            publish_debug = bool(getattr(self, 'publish_debug_image', False))
+
+        # Handle debug image publisher
+        if publish_debug and self.debug_pub is None:
+            self.debug_pub = self.create_publisher(Image, '/apriltag/detected_image', 10)
+            self.get_logger().info("Debug detected image topic PUBLISHED on /apriltag/detected_image.")
+        elif not publish_debug and self.debug_pub is not None:
+            try:
+                self.destroy_publisher(self.debug_pub)
+            except Exception:
+                pass
+            self.debug_pub = None
+            self.get_logger().info("Debug detected image topic DISABLED.")
+
+        # Handle GUI windows
+        gui_setup = getattr(self, '_gui_setup', False)
+        if enable_gui and not gui_setup:
+            try:
+                cv2.namedWindow("AprilTag Original", cv2.WINDOW_NORMAL)
+                cv2.namedWindow("AprilTag Detected", cv2.WINDOW_NORMAL)
+                cv2.resizeWindow("AprilTag Original", 640, 480)
+                cv2.resizeWindow("AprilTag Detected", 640, 480)
+                self._gui_setup = True
+                self.get_logger().info("OpenCV GUI visualization ENABLED.")
+            except cv2.error as e:
+                self.get_logger().warn(f"OpenCV GUI error when enabling windows: {e}")
+                self._gui_setup = False
+        elif not enable_gui and gui_setup:
+            try:
+                cv2.destroyWindow("AprilTag Original")
+                cv2.destroyWindow("AprilTag Detected")
+            except cv2.error:
+                try:
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+            self._gui_setup = False
+            self.get_logger().info("OpenCV GUI visualization DISABLED.")
+
+        # Update cached flags
+        self.enable_gui = enable_gui
+        self.publish_debug_image = publish_debug
+
+    def _on_set_parameters(self, params):
+        """rclpy parameter callback to react to runtime parameter changes."""
+        changed = False
+        for p in params:
+            if p.name == 'enable_gui':
+                changed = True
+            elif p.name == 'publish_debug_image':
+                changed = True
+            elif p.name == 'multiscale_scales':
+                # reparse scales if changed
+                try:
+                    self.multiscale_scales = self._parse_multiscale_scales(p.value)
+                except Exception:
+                    pass
+                changed = True
+            elif p.name == 'enable_multiscale':
+                try:
+                    self.enable_multiscale = bool(p.value)
+                except Exception:
+                    pass
+                changed = True
+
+        if changed:
+            # Apply visualization state changes (create/destroy windows/publishers)
+            try:
+                self._apply_visualization_settings()
+            except Exception as e:
+                self.get_logger().warn(f"Error applying visualization settings: {e}")
+
+        # Always return successful so parameter setting isn't blocked
+        result = SetParametersResult()
+        result.successful = True
+        result.reason = ''
+        return result
+
+    def _detect_multiscale(self, gray):
+        """
+        Run AprilTag detection on multiple image scales and merge results.
+
+        For each scale:
+          - resize the gray image
+          - run detector
+          - rescale all corner / center coordinates back to original image coordinates
+        Then:
+          - deduplicate by tag id, keeping the detection with largest image area.
+        """
+        h, w = gray.shape[:2]
+        all_dets = []
+
+        for scale in self.multiscale_scales:
+            # Avoid ridiculous sizes
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            if new_w < 32 or new_h < 32:
+                continue
+
+            if abs(scale - 1.0) < 1e-3:
+                img_scaled = gray
+            else:
+                img_scaled = cv2.resize(
+                    gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR
+                )
+
+            dets = self.detector.detect(img_scaled)
+            for d in dets:
+                # Shallow copy so we don't mutate original dict from detector
+                d2 = dict(d)
+
+                # Rescale all pixel coordinates back to original image space
+                for key in ['lb', 'rb', 'rt', 'lt', 'center']:
+                    if key in d2:
+                        d2[key] = d2[key] / scale
+
+                if 'lb-rb-rt-lt' in d2:
+                    d2['lb-rb-rt-lt'] = d2['lb-rb-rt-lt'] / scale
+
+                d2['_scale'] = scale  # optional debug info
+                all_dets.append(d2)
+
+        if not all_dets:
+            return []
+
+        # Deduplicate by tag id: keep the one with largest apparent area
+        dedup = {}
+        for d in all_dets:
+            tag_id = d['id']
+
+            # Estimate area from corners
+            if 'lb-rb-rt-lt' in d:
+                corners = d['lb-rb-rt-lt']
+            else:
+                corners = np.array([d['lb'], d['rb'], d['rt'], d['lt']])
+            xs = corners[:, 0]
+            ys = corners[:, 1]
+            area = float((xs.max() - xs.min()) * (ys.max() - ys.min()))
+
+            if tag_id not in dedup or area > dedup[tag_id]['area']:
+                dedup[tag_id] = {'det': d, 'area': area}
+
+        return [v['det'] for v in dedup.values()]
 
     # ------------------------------------------------------------------ #
     # Main callback
@@ -200,7 +457,12 @@ class AprilTagVisualizationNode(Node):
                            [-1, -1, -1]], dtype=np.float32)
         postprocessed = cv2.filter2D(gray, -1, kernel)
 
-        detections = self.detector.detect(gray)
+        # --- Detection: single scale or multiscale ---
+        if self.enable_multiscale:
+            detections = self._detect_multiscale(gray)
+        else:
+            detections = self.detector.detect(gray)
+
         detected_vis = rectified.copy()
 
         marker_array_msg = MarkerPoseArray()
@@ -231,7 +493,7 @@ class AprilTagVisualizationNode(Node):
                     )
                     continue
 
-                # Draw box (only affects detected_vis, for screenshots)
+                # Draw box (only affects detected_vis, for screenshots / debug)
                 cv2.line(detected_vis, lt, rt, (0, 255, 0), 2)
                 cv2.line(detected_vis, rt, rb, (0, 255, 0), 2)
                 cv2.line(detected_vis, rb, lb, (0, 255, 0), 2)
@@ -334,11 +596,81 @@ class AprilTagVisualizationNode(Node):
 
             marker_array_msg.markers.append(marker_msg)
 
-        # Store last annotated image (for save_screenshots)
+        # Store last annotated image
         self.current_detected = detected_vis.copy()
 
-        # Publish marker array
-        self.pub.publish(marker_array_msg)
+        # --- NEW: visualization (OpenCV windows) ---
+        if self.enable_gui:
+            try:
+                cv2.imshow("AprilTag Original", self.current_original)
+                cv2.imshow("AprilTag Detected", self.current_detected)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('s'):
+                    self.save_screenshots()
+                # if key == ord('q'):
+                #     rclpy.shutdown()  # optional, usually just Ctrl+C
+            except cv2.error as e:
+                self.get_logger().warn(f"OpenCV GUI error: {e}")
+
+        # --- NEW: publish debug image if requested ---
+        if self.publish_debug_image and self.debug_pub is not None:
+            dbg_msg = self.bridge.cv2_to_imgmsg(self.current_detected, encoding='bgr8')
+            dbg_msg.header = msg.header
+            self.debug_pub.publish(dbg_msg)
+
+        # ----------- inline buffering logic -----------
+        if not self.enable_buffer:
+            # Old behaviour: publish raw detections
+            self.pub.publish(marker_array_msg)
+            return
+
+        # With buffering enabled, update internal state and publish "stable" markers
+        try:
+            now = Time.from_msg(marker_array_msg.header.stamp)
+        except Exception:
+            # Fallback to node clock if header.stamp is empty
+            now = self.get_clock().now()
+
+        # 1. Update markers we actually see in this frame
+        for m in marker_array_msg.markers:
+            if m.id in self.marker_state:
+                prev_marker: MarkerPose = self.marker_state[m.id]["marker"]
+                # low-pass filter on distance
+                filtered_distance = (
+                    self.buffer_distance_alpha * m.distance
+                    + (1.0 - self.buffer_distance_alpha) * prev_marker.distance
+                )
+                new_marker = copy.deepcopy(m)
+                new_marker.distance = float(filtered_distance)
+                # we keep the current pose; only distance is smoothed
+            else:
+                # First time we see this marker
+                new_marker = copy.deepcopy(m)
+
+            self.marker_state[m.id] = {
+                "marker": new_marker,
+                "last_seen": now,
+            }
+
+        # 2. Build output array with all markers that are still "fresh" enough
+        out = MarkerPoseArray()
+        out.header = marker_array_msg.header
+
+        ids_to_delete = []
+        for marker_id, state in self.marker_state.items():
+            age = (now - state["last_seen"]).nanoseconds / 1e9
+
+            if age <= self.buffer_max_age_sec:
+                # Still fresh enough → keep
+                out.markers.append(state["marker"])
+            else:
+                # Too old → forget this marker
+                ids_to_delete.append(marker_id)
+
+        for marker_id in ids_to_delete:
+            del self.marker_state[marker_id]
+
+        self.pub.publish(out)
 
 
 def main(args=None):
@@ -354,6 +686,35 @@ def main(args=None):
         action="store_true",
         help="Use experimental hardcoded RAW calibration instead of the default one."
     )
+    # NEW: CLI flag to enable buffer easily
+    parser.add_argument(
+        "--enable_buffer",
+        action="store_true",
+        help="Enable temporal buffering of detected markers."
+    )
+    parser.add_argument(
+        "--enable_multiscale",
+        action="store_true",
+        help="Enable multiscale AprilTag detection."
+    )
+    parser.add_argument(
+        "--multiscale_scales",
+        type=str,
+        default="1.0",
+        help="Comma-separated list of scales, e.g. '0.7,1.0,1.4'."
+    )
+    # NEW: visualization flags
+    parser.add_argument(
+        "--enable_gui",
+        action="store_true",
+        help="Show OpenCV windows (requires X/xlaunch)."
+    )
+    parser.add_argument(
+        "--publish_debug_image",
+        action="store_true",
+        help="Publish annotated detected image on /apriltag/detected_image."
+    )
+
     parsed, _ = parser.parse_known_args()
 
     node = AprilTagVisualizationNode(
@@ -361,10 +722,22 @@ def main(args=None):
         tag_family=parsed.tag_family,
     )
 
+    params = []
     if parsed.use_raw:
-        node.set_parameters([
-            Parameter('use_raw', Parameter.Type.BOOL, True)
-        ])
+        params.append(Parameter('use_raw', Parameter.Type.BOOL, True))
+    if parsed.enable_buffer:
+        params.append(Parameter('enable_buffer', Parameter.Type.BOOL, True))
+    if parsed.enable_multiscale:
+        params.append(Parameter('enable_multiscale', Parameter.Type.BOOL, True))
+    # Always push the string, so it matches the param declaration
+    params.append(Parameter('multiscale_scales', Parameter.Type.STRING, parsed.multiscale_scales))
+    if parsed.enable_gui:
+        params.append(Parameter('enable_gui', Parameter.Type.BOOL, True))
+    if parsed.publish_debug_image:
+        params.append(Parameter('publish_debug_image', Parameter.Type.BOOL, True))
+
+    if params:
+        node.set_parameters(params)
 
     try:
         rclpy.spin(node)

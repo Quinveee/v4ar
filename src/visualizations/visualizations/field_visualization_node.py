@@ -3,7 +3,7 @@
 import os
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Vector3
 from perception_msgs.msg import MarkerPoseArray
 from ament_index_python.packages import get_package_share_directory
 
@@ -144,15 +144,28 @@ class FieldVisualizationNode(Node):
         # kept for compatibility, but world_to_pixel uses your custom convention
         self.declare_parameter("origin_at_center", False)
 
+        # Allow selecting buffered markers or custom topics
+        self.declare_parameter("use_buffered_markers", False)
+        # if empty, chosen based on use_buffered_markers
+        self.declare_parameter("marker_topic", "")
+        self.declare_parameter("pose_topic", "/robot_pose")
+
         # marker config (same default as triangulation_node)
         self.declare_parameter("marker_config", "config/markers.yaml")
 
         field_image_path = self.get_parameter("field_image").value
         self.draw_field_flag = bool(self.get_parameter("draw_field").value)
-        self.scale_px_per_mm = float(self.get_parameter("scale_px_per_mm").value)
-        self.field_length_mm = float(self.get_parameter("field_length_mm").value)
+        self.scale_px_per_mm = float(
+            self.get_parameter("scale_px_per_mm").value)
+        self.field_length_mm = float(
+            self.get_parameter("field_length_mm").value)
         self.field_width_mm = float(self.get_parameter("field_width_mm").value)
-        self.origin_at_center = bool(self.get_parameter("origin_at_center").value)
+        self.origin_at_center = bool(
+            self.get_parameter("origin_at_center").value)
+        self.use_buffered_markers = bool(
+            self.get_parameter("use_buffered_markers").value)
+        self.marker_topic_param = str(self.get_parameter("marker_topic").value)
+        self.pose_topic = str(self.get_parameter("pose_topic").value)
 
         # --- Load marker_map from YAML (in meters) ---
         config_path = self.get_parameter("marker_config").value
@@ -174,7 +187,8 @@ class FieldVisualizationNode(Node):
         # --- Create / Load field image ---
         if self.draw_field_flag:
             try:
-                self.field_img = draw_field(scale_px_per_mm=self.scale_px_per_mm)
+                self.field_img = draw_field(
+                    scale_px_per_mm=self.scale_px_per_mm)
                 self.get_logger().info(
                     f"Using programmatically drawn field (scale={self.scale_px_per_mm} px/mm)."
                 )
@@ -190,7 +204,8 @@ class FieldVisualizationNode(Node):
             self.get_logger().warn(
                 f"Could not load field image at '{field_image_path}'. Using a blank field instead."
             )
-            self.field_img = np.full((600, 900, 3), (0, 128, 0), dtype=np.uint8)
+            self.field_img = np.full(
+                (600, 900, 3), (0, 128, 0), dtype=np.uint8)
 
         self.field_h, self.field_w = self.field_img.shape[:2]
 
@@ -208,12 +223,27 @@ class FieldVisualizationNode(Node):
         self.latest_markers = []
 
         # --- Subscriptions ---
+        # Determine the marker topic: explicit `marker_topic` param wins,
+        # otherwise select buffered or unbuffered topic based on `use_buffered_markers`.
+        if self.marker_topic_param:
+            marker_topic = self.marker_topic_param
+        else:
+            marker_topic = "/detected_markers_buffered" if self.use_buffered_markers else "/detected_markers"
+
         self.pose_sub = self.create_subscription(
-            PoseStamped, "/robot_pose", self.pose_callback, 10
-        )
+            PoseStamped, self.pose_topic, self.pose_callback, 10)
         self.markers_sub = self.create_subscription(
-            MarkerPoseArray, "/detected_markers", self.markers_callback, 10
+            MarkerPoseArray, marker_topic, self.markers_callback, 10)
+        self.latest_vector = None
+        self.vector_sub = self.create_subscription(
+            Vector3,
+            "/nav/steering_vector",
+            self.vector_callback,
+            10
         )
+
+        self.get_logger().info(
+            f"FieldVisualization listening to pose: {self.pose_topic}, markers: {marker_topic}")
 
         # --- Timer for rendering ---
         self.timer = self.create_timer(0.1, self.render)  # 10 Hz
@@ -222,9 +252,7 @@ class FieldVisualizationNode(Node):
         cv2.namedWindow("Rover on Field", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("Rover on Field", 900, 600)
 
-        self.get_logger().info(
-            "FieldVisualizationNode started. Listening to /robot_pose and /detected_markers."
-        )
+        self.get_logger().info("FieldVisualizationNode started.")
 
     # ------------------------------------------------------------------ #
     # Config loader
@@ -235,10 +263,12 @@ class FieldVisualizationNode(Node):
         try:
             with open(path, "r") as f:
                 data = yaml.safe_load(f)
-            marker_map = {int(k): tuple(v) for k, v in data["marker_map"].items()}
+            marker_map = {int(k): tuple(v)
+                          for k, v in data["marker_map"].items()}
             return marker_map
         except Exception as e:
-            self.get_logger().error(f"Failed to load marker config from {path}: {e}")
+            self.get_logger().error(
+                f"Failed to load marker config from {path}: {e}")
             return {}
 
     # ------------------------------------------------------------------ #
@@ -255,6 +285,8 @@ class FieldVisualizationNode(Node):
     def markers_callback(self, msg: MarkerPoseArray):
         self.latest_markers = msg.markers
 
+    def vector_callback(self, msg: Vector3):
+        self.latest_vector = (msg.x, msg.y)
     # ------------------------------------------------------------------ #
     # Coordinate mapping
     # ------------------------------------------------------------------ #
@@ -362,6 +394,30 @@ class FieldVisualizationNode(Node):
             if radius_px > 0 and radius_px < 5000:  # avoid crazy values
                 cv2.circle(img, (mu, mv), radius_px, (128, 128, 255), 1)
 
+    def draw_heading_vector(self, img, rover_u, rover_v):
+        if self.latest_vector is None:
+            return
+
+        vx, vy = self.latest_vector
+
+        # Scale for visibility — field is large, actual vector is unit length
+        scale = 300  # pixels to draw
+
+        # Convert (vx, vy) from world meters to pixel direction
+        end_u = int(rover_u + vx * scale)
+        # invert y because image pixels go downward
+        end_v = int(rover_v - vy * scale)
+
+        # Draw main arrow line
+        cv2.arrowedLine(
+            img,
+            (rover_u, rover_v),
+            (end_u, end_v),
+            (0, 0, 255),  # red arrow
+            3,
+            tipLength=0.2,
+        )
+
     # ------------------------------------------------------------------ #
     # Render loop
     # ------------------------------------------------------------------ #
@@ -414,11 +470,15 @@ class FieldVisualizationNode(Node):
             2,
         )
 
+        # Draw steering vector arrow
+        self.draw_heading_vector(field, rover_u, rover_v)
+
         # Draw lines + distance annotations to visible markers
         self.draw_marker_ranges_from_rover(field, rover_u, rover_v)
 
         # Also show which marker IDs are currently seen
-        visible_ids = [m.id for m in self.latest_markers if m.id in self.marker_map]
+        visible_ids = [
+            m.id for m in self.latest_markers if m.id in self.marker_map]
         cv2.putText(
             field,
             f"Visible markers: {visible_ids}",
@@ -441,7 +501,8 @@ class FieldVisualizationNode(Node):
 def main(args=None):
     import argparse
 
-    parser = argparse.ArgumentParser(description="Rover-on-field triangulation visualization")
+    parser = argparse.ArgumentParser(
+        description="Rover-on-field triangulation visualization")
     parser.add_argument(
         "--field_image",
         type=str,
@@ -467,11 +528,13 @@ def main(args=None):
     # Optional CLI overrides
     params = []
     if parsed_args.field_image is not None:
-        params.append(node.get_parameter("field_image").set__string(parsed_args.field_image))
+        params.append(node.get_parameter(
+            "field_image").set__string(parsed_args.field_image))
     if parsed_args.origin_at_center:
         params.append(node.get_parameter("origin_at_center").set__bool(True))
     if parsed_args.marker_config is not None:
-        params.append(node.get_parameter("marker_config").set__string(parsed_args.marker_config))
+        params.append(node.get_parameter(
+            "marker_config").set__string(parsed_args.marker_config))
 
     if params:
         node.set_parameters(params)

@@ -174,12 +174,15 @@ class AprilTagVisualizationNode(Node):
 
         self.display_rectified_image = None
 
-        if not self.no_gui:
+        if self.no_gui:
             cv2.namedWindow("1. Original Image", cv2.WINDOW_NORMAL)
             cv2.namedWindow(
                 "2. Detected AprilTags (Postprocessed)", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("1. Original Image", 640, 480)
             cv2.resizeWindow("2. Detected AprilTags (Postprocessed)", 640, 480)
+
+        # add buffer
+        self.marker_buffer = {}
 
     # ------------------------------------------------------------------ #
     # Utilities
@@ -222,10 +225,10 @@ class AprilTagVisualizationNode(Node):
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray = clahe.apply(gray)
 
-        kernel = np.array([[-1, -1, -1],
-                           [-1,  9, -1],
-                           [-1, -1, -1]], dtype=np.float32)
-        postprocessed = cv2.filter2D(gray, -1, kernel)
+        # kernel = np.array([[-1, -1, -1],
+        #                    [-1,  9, -1],
+        #                    [-1, -1, -1]], dtype=np.float32)
+        # postprocessed = cv2.filter2D(gray, -1, kernel)
 
         detections = self.detector.detect(gray)
         detected_vis = rectified.copy()
@@ -377,7 +380,7 @@ class AprilTagVisualizationNode(Node):
         # Update the detected AprilTags window to show the rectified image with detections
         self.current_detected = detected_vis.copy()
 
-        if not self.no_gui:
+        if self.no_gui:
             cv2.imshow("1. Original Image", self.current_original)
             cv2.imshow("2. Detected AprilTags (Postprocessed)",
                        self.current_detected)
@@ -399,7 +402,7 @@ def main(args=None):
     parser.add_argument("--tag_family", type=str, default="tagStandard41h12")
     parser.add_argument("--output_dir", type=str,
                         default="apriltag_screenshots")
-    parser.add_argument("--no-gui", action="store_true")
+    parser.add_argument("--no_gui", action="store_false")
     parser.add_argument(
         "--calibration",
         type=str,

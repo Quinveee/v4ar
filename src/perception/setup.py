@@ -31,7 +31,11 @@ setup(
             'apriltag_vis_node_2 = marker_detector.apriltag_vis_node_2:main',
             'camera_calibration = marker_detector.camera_calibration:main',
             'triangulation = marker_detector.triangulation_node:main',
+            'marker_buffer = marker_detector.marker_buffer_node:main',
+            'field_visualization = visualizations.field_visualization_node:main',
+            'robust_localization = marker_detector.robust_localization_node:main',
             'apriltag = marker_detector.apriltag_detector:main',
+            'localization = marker_detector.localization:main'
         ],
     },
 )

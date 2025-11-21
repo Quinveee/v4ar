@@ -1,17 +1,58 @@
 import numpy as np
 from .base_solver import BaseTriangulationSolver
 
+
 class LeastSquaresSolver(BaseTriangulationSolver):
-    def solve(self, detections, marker_map):
-        ref_id, ref_d = detections[0]
-        x1, y1 = marker_map[ref_id]
+    """Exact two-marker triangulation solver (two-circle intersection)."""
 
-        A, b = [], []
-        for (mid, d) in detections[1:]:
-            x2, y2 = marker_map[mid]
-            A.append([2 * (x2 - x1), 2 * (y2 - y1)])
-            b.append((x2**2 - x1**2) + (y2**2 - y1**2) + (ref_d**2 - d**2))
+    def solve(self, detections, marker_map, *args, **kwargs):
+        # Must have at least two detections
+        if len(detections) < 2:
+            raise ValueError("Need at least two markers for triangulation")
 
-        A, b = np.array(A), np.array(b)
-        xy, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-        return xy
+        (id1, d1), (id2, d2) = detections[:2]
+        x1, y1 = marker_map[id1]
+        x2, y2 = marker_map[id2]
+
+        dx, dy = x2 - x1, y2 - y1
+        d = np.hypot(dx, dy)
+
+        if d == 0:
+            raise ValueError("Markers have identical positions")
+
+        # Distance from marker 1 along the line between markers
+        a = (d1**2 - d2**2 + d**2) / (2 * d)
+
+        # Height from the line (triangle height)
+        h_sq = d1**2 - a**2
+        if h_sq < 0:
+            raise ValueError("No real intersection (circles do not meet)")
+
+        h = np.sqrt(h_sq)
+
+        # Base point on the line between markers
+        x3 = x1 + (a * dx) / d
+        y3 = y1 + (a * dy) / d
+
+        # Two intersection points
+        x_int1 = x3 + (h * dy) / d
+        y_int1 = y3 - (h * dx) / d
+        x_int2 = x3 - (h * dy) / d
+        y_int2 = y3 + (h * dx) / d
+
+        # Prefer intersection where both x and y are positive
+        p1_positive = (x_int1 > 0.0) and (y_int1 > 0.0)
+        p2_positive = (x_int2 > 0.0) and (y_int2 > 0.0)
+
+        if p1_positive and not p2_positive:
+            chosen = (x_int1, y_int1)
+        elif p2_positive and not p1_positive:
+            chosen = (x_int2, y_int2)
+        else:
+            # fallback: choose the intersection with the higher y
+            if y_int1 >= y_int2:
+                chosen = (x_int1, y_int1)
+            else:
+                chosen = (x_int2, y_int2)
+
+        return np.array(chosen)

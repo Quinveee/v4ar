@@ -37,3 +37,22 @@ class WeightedGazeStrategy(BaseGazeStrategy):
         tilt_angle = -self.kp_tilt * tilt_error
 
         return (pan_angle, tilt_angle)
+
+    def compute_angles_from_markers(self, markers):
+        if not markers:
+            return (0.0, 0.0)
+
+        distances = np.array([m.distance for m in markers])
+        weights = 1.0 / np.clip(distances, 0.1, None)
+        weights /= np.sum(weights)
+
+        avg_x = np.sum([w * m.center_x for w, m in zip(weights, markers)])
+        avg_y = np.sum([w * m.center_y for w, m in zip(weights, markers)])
+
+        pan_error = (avg_x - self.center_x) / self.center_x
+        tilt_error = (avg_y - self.center_y) / self.center_y
+
+        pan_cmd = -self.kp_pan * pan_error
+        tilt_cmd = -self.kp_tilt * tilt_error
+
+        return pan_cmd, tilt_cmd

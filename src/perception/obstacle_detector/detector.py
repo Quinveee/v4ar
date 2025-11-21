@@ -8,7 +8,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Pose, Point, Quaternion
-from perception_msgs.msg import RoverPose, RoverPoseArray
+from perception_msgs.msg import ObjectPose, ObjectPoseArray
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
@@ -59,7 +59,7 @@ class RoverDetectorWithPose(Node):
         self.create_subscription(CameraInfo, '/color/camera_info', self.camera_info_callback, 10)
 
         # Publishers
-        self.rover_pose_pub = self.create_publisher(RoverPoseArray, '/detected_rovers', 10)
+        self.rover_pose_pub = self.create_publisher(ObjectPoseArray, '/detected_rovers', 10)
         
         if self.publish_visualization:
             self.viz_pub = self.create_publisher(Image, '/rover_detection/visualization', 10)
@@ -298,12 +298,12 @@ class RoverDetectorWithPose(Node):
                         })
 
         # ===== PUBLISH ROVER POSES =====
-        rover_array_msg = RoverPoseArray()
+        rover_array_msg = ObjectPoseArray()
         rover_array_msg.header.stamp = self.get_clock().now().to_msg()
         rover_array_msg.header.frame_id = "oak_rgb_camera_optical_frame"
         
         for rover in detected_rovers:
-            rover_msg = RoverPose()
+            rover_msg = ObjectPose()
             rover_msg.id = rover['id']
             
             # Pose in camera frame

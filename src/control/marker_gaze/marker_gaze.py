@@ -4,9 +4,11 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 from perception_msgs.msg import MarkerPoseArray
 from .gaze_strategies.weighed_gaze_strategy import WeightedGazeStrategy
+from .gaze_strategies.vibe_gaze_strategy import ActiveSearchGazeStrategy
 
 STRATEGIES = {
     "weighted": WeightedGazeStrategy,
+    "vibe": ActiveSearchGazeStrategy,
 }
 
 

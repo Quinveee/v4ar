@@ -9,8 +9,8 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MarkerPose.msg"
   "msg/MarkerPoseArray.msg"
-  "msg/RoverPose.msg"     
-  "msg/RoverPoseArray.msg"
+  "msg/ObjectPose.msg"     
+  "msg/ObjectPoseArray.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 
