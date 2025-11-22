@@ -1,33 +1,109 @@
 #!/usr/bin/env python3
+"""
+Navigation with Avoidance Node using Strategy Pattern.
+
+This node provides a flexible navigation system where different control strategies
+can be plugged in without modifying the core ROS node logic.
+"""
+
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Twist, Vector3
 from perception_msgs.msg import ObjectPoseArray
 import math
-import numpy as np
-import argparse
+
+from .navigation_strategies import (
+    BaseNavigationStrategy,
+    PotentialFieldStrategy,
+    DirectGoalStrategy,
+    DWAStrategy
+)
+
+# Registry of available strategies
+AVAILABLE_STRATEGIES = {
+    "potential_field": PotentialFieldStrategy,
+    "direct_goal": DirectGoalStrategy,
+    "dwa": DWAStrategy,
+}
 
 
 class NavigationWithAvoidanceNode(Node):
-    def __init__(self, x=1.0, y=1.0, safe_distance=1.2, repulse_strength=1.5):
+    """
+    ROS2 node for navigation with obstacle avoidance using pluggable strategies.
+
+    This node handles:
+    - ROS communication (subscriptions, publishers, timers)
+    - Coordinate transformations (camera frame to world frame)
+    - State management (robot pose, obstacles)
+
+    The actual control logic is delegated to a navigation strategy that implements
+    the BaseNavigationStrategy interface.
+    """
+
+    def __init__(self, strategy: BaseNavigationStrategy = None):
+        """
+        Initialize the navigation node.
+
+        Args:
+            strategy: Optional pre-configured strategy instance. If None, creates
+                     strategy based on ROS parameters.
+
+        ROS Parameters:
+            strategy_type (str): Type of navigation strategy ('potential_field')
+            target_x (float): Target x coordinate in meters
+            target_y (float): Target y coordinate in meters
+            safe_distance (float): Safe distance from obstacles in meters
+            repulse_strength (float): Repulsion strength from obstacles
+            goal_tolerance (float): Distance threshold to consider goal reached
+            max_linear_velocity (float): Maximum forward velocity in m/s
+            angular_gain (float): Proportional gain for angular control
+        """
         super().__init__('navigation_with_avoidance_node')
 
-        # Target
-        self.declare_parameter("target_x", x)
-        self.declare_parameter("target_y", y)
-        self.declare_parameter("safe_distance", safe_distance)
-        self.declare_parameter("repulse_strength", repulse_strength)
+        # Declare ROS parameters with defaults
+        self.declare_parameter("strategy_type", "potential_field")
+        self.declare_parameter("target_x", 1.0)
+        self.declare_parameter("target_y", 1.0)
+        self.declare_parameter("safe_distance", 1.2)
+        self.declare_parameter("repulse_strength", 1.5)
+        self.declare_parameter("goal_tolerance", 0.1)
+        self.declare_parameter("max_linear_velocity", 0.1)
+        self.declare_parameter("angular_gain", 0.5)
+
+        # Get parameter values
+        strategy_type = self.get_parameter("strategy_type").value
         self.target_x = self.get_parameter("target_x").value
         self.target_y = self.get_parameter("target_y").value
-        self.safe_distance = self.get_parameter("safe_distance").value
-        self.repulse_strength = self.get_parameter("repulse_strength").value
 
-        # Robot pose
+        # Initialize or create strategy
+        if strategy is None:
+            if strategy_type not in AVAILABLE_STRATEGIES:
+                self.get_logger().warn(
+                    f"Unknown strategy '{strategy_type}', defaulting to 'potential_field'"
+                )
+                strategy_type = "potential_field"
+
+            # Create strategy with parameters
+            strategy_class = AVAILABLE_STRATEGIES[strategy_type]
+            self.strategy = strategy_class(
+                safe_distance=self.get_parameter("safe_distance").value,
+                repulse_strength=self.get_parameter("repulse_strength").value,
+                goal_tolerance=self.get_parameter("goal_tolerance").value,
+                max_linear_velocity=self.get_parameter("max_linear_velocity").value,
+                angular_gain=self.get_parameter("angular_gain").value
+            )
+        else:
+            self.strategy = strategy
+
+        # Robot state
         self.robot_x = None
         self.robot_y = None
         self.robot_yaw = None
 
-        # Subscriptions
+        # Obstacles in world frame
+        self.obstacles = []  # List of (x, y) tuples
+
+        # ROS Subscriptions
         self.sub_pose = self.create_subscription(
             PoseStamped, "/robot_pose", self.pose_callback, 10
         )
@@ -35,22 +111,26 @@ class NavigationWithAvoidanceNode(Node):
             ObjectPoseArray, "/detected_rovers", self.rover_callback, 10
         )
 
-        # Publisher
+        # ROS Publishers
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
-        self.heading_msg = self.create_publisher(
-            Vector3, "/control/heading_vector", 10)
+        self.heading_pub = self.create_publisher(Vector3, "/control/heading_vector", 10)
 
-        # Store obstacles
-        self.obstacles = []  # (x, y) positions in world frame
-
-        # Timer
+        # Control loop timer (20 Hz)
         self.timer = self.create_timer(0.05, self.control_loop)
 
-        self.get_logger().info("NavigationWithAvoidanceNode running.")
+        self.get_logger().info(
+            f"NavigationWithAvoidanceNode initialized with strategy: {strategy_type}"
+        )
+        self.get_logger().info(
+            f"Target: ({self.target_x:.2f}, {self.target_y:.2f})"
+        )
 
+    # -------------------------------------------------------------------
+    # ROS Callbacks
     # -------------------------------------------------------------------
 
     def pose_callback(self, msg: PoseStamped):
+        """Update robot pose from incoming PoseStamped message."""
         self.robot_x = msg.pose.position.x
         self.robot_y = msg.pose.position.y
 
@@ -60,18 +140,21 @@ class NavigationWithAvoidanceNode(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         )
 
-    # -------------------------------------------------------------------
-
     def rover_callback(self, msg: ObjectPoseArray):
-        # Convert every detected rover to world-frame x,y
+        """
+        Update obstacle list from detected rovers.
+
+        Converts rover positions from camera frame to world frame.
+        """
         self.obstacles = []
 
         for obj in msg.rovers:
+            # TODO: What happens when we move the camera???
             # Rover is relative to the camera — assume camera aligned with robot
             dx = obj.pose.position.z     # forward
             dy = -obj.pose.position.x    # left/right
 
-            # Now convert to world frame
+            # Convert to world frame
             world_x = self.robot_x + dx * \
                 math.cos(self.robot_yaw) - dy * math.sin(self.robot_yaw)
             world_y = self.robot_y + dx * \
@@ -80,108 +163,56 @@ class NavigationWithAvoidanceNode(Node):
             self.obstacles.append((world_x, world_y))
 
     # -------------------------------------------------------------------
+    # Control Loop
+    # -------------------------------------------------------------------
 
     def control_loop(self):
+        """
+        Main control loop - delegates to the navigation strategy.
+
+        This method is called at a fixed rate (20 Hz) and:
+        1. Checks if robot pose is available
+        2. Calls the strategy to compute control commands
+        3. Publishes the commands and optional visualization data
+        """
+        # Wait for robot pose to be available
         if self.robot_x is None:
             return
 
-        # ---------------------------------------------------
-        # 1. Attractive force toward target
-        # ---------------------------------------------------
-        dx = self.target_x - self.robot_x
-        dy = self.target_y - self.robot_y
-        dist_to_goal = math.sqrt(dx*dx + dy*dy)
+        # Delegate control computation to the strategy
+        cmd, heading_vec, goal_reached = self.strategy.compute_control(
+            robot_x=self.robot_x,
+            robot_y=self.robot_y,
+            robot_yaw=self.robot_yaw,
+            target_x=self.target_x,
+            target_y=self.target_y,
+            obstacles=self.obstacles
+        )
 
-        goal_vec = np.array([dx, dy])
-        goal_vec_norm = goal_vec / (np.linalg.norm(goal_vec) + 1e-6)
-
-        # ---------------------------------------------------
-        # 2. Repulsion from rovers (dynamic obstacles)
-        # ---------------------------------------------------
-        repulse_sum = np.array([0.0, 0.0])
-        repulse_strength = self.repulse_strength
-        safe_distance = self.safe_distance
-
-        for ox, oy in self.obstacles:
-            vx = self.robot_x - ox
-            vy = self.robot_y - oy
-            distance = math.sqrt(vx*vx + vy*vy)
-
-            if distance < safe_distance:
-                direction_norm = np.array([vx, vy]) / (distance + 1e-6)
-                strength = repulse_strength * \
-                    (1.0 / (distance*distance + 1e-6))
-                repulse_sum += direction_norm * strength
-
-        # ---------------------------------------------------
-        # 3. Combine the vectors
-        # ---------------------------------------------------
-        combined = goal_vec_norm + repulse_sum
-        combined_norm = combined / (np.linalg.norm(combined) + 1e-6)
-
-        # Desired heading
-        target_heading = math.atan2(combined_norm[1], combined_norm[0])
-
-        # Compute angular error
-        heading_error = self.angle_diff(target_heading, self.robot_yaw)
-
-        # ---------------------------------------------------
-        # 4. Convert to velocity commands
-        # ---------------------------------------------------
-        cmd = Twist()
-
-        # Stop at goal
-        if dist_to_goal < 0.1:
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-            self.cmd_pub.publish(cmd)
-            self.get_logger().info("Target reached.")
-            return
-
-        cmd.angular.z = 0.5 * heading_error
-
-        # Slow down if obstacle repulsion is large
-        repulse_mag = np.linalg.norm(repulse_sum)
-        speed_scale = max(0.1, 1.0 - repulse_mag)
-
-        cmd.linear.x = 0.1 * speed_scale
-
+        # Publish velocity command
         self.cmd_pub.publish(cmd)
 
-        heading_msg = Vector3()
-        heading_msg.x = combined_norm[0]
-        heading_msg.y = combined_norm[1]
-        heading_msg.z = 0.0
-        self.heading_msg.publish(heading_msg)
+        # Publish heading vector for visualization (if provided)
+        if heading_vec is not None:
+            self.heading_pub.publish(heading_vec)
 
-    # -------------------------------------------------------------------
-
-    @staticmethod
-    def angle_diff(a, b):
-        d = a - b
-        return math.atan2(math.sin(d), math.cos(d))
+        # Log when goal is reached
+        if goal_reached:
+            self.get_logger().info("Target reached.", throttle_duration_sec=1.0)
 
 
 def main(args=None):
-    parser = argparse.ArgumentParser(
-        description="Navigation with Obstacle Avoidance Node")
-    parser.add_argument("--target_x", type=float,
-                        default=1.0, help="Target X coordinate in meters")
-    parser.add_argument("--target_y", type=float,
-                        default=1.0, help="Target Y coordinate in meters")
-    parser.add_argument("--safe_distance", type=float,
-                        default=1.2, help="Safe distance from obstacles in meters")
-    parser.add_argument("--repulse_strength", type=float,
-                        default=1.5, help="Repulsion strength from obstacles")
-    parsed_args, unknown = parser.parse_known_args()
-    rclpy.init(args=unknown)
-    node = NavigationWithAvoidanceNode(
-        x=parsed_args.target_x, y=parsed_args.target_y,
-        safe_distance=parsed_args.safe_distance,
-        repulse_strength=parsed_args.repulse_strength)
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    """Main entry point for the navigation node."""
+    rclpy.init(args=args)
+    node = NavigationWithAvoidanceNode()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

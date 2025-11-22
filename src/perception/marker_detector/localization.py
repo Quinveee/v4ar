@@ -10,7 +10,10 @@ STRATEGIES = {
     "kalman": KalmanLocalization,
     "complementary": ComplementaryLocalization,
     "robust": RobustLocalization,
-    "identity": IdentityLocalization
+    "identity": IdentityLocalization,
+    "adaptive_kalman": AdaptiveKalmanLocalization,
+    "particle_filter": ParticleFilterLocalization,
+    "sliding_window": SlidingWindowLocalization
 }
 
 
