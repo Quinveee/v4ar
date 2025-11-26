@@ -9,7 +9,7 @@ setup(
     version='0.0.0',
     packages=find_packages(
         where='.',  # search in current dir
-        include=['marker_detector', "*marker_detector*",'line_detector', '*detector*', 'launch', 'config']
+        include=['marker_detector', "*marker_detector*",'line_detector', '*detector*', 'odometry', '*odometry*', 'launch', 'config']
     ),
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
@@ -35,7 +35,9 @@ setup(
             'field_visualization = visualizations.field_visualization_node:main',
             'robust_localization = marker_detector.robust_localization_node:main',
             'apriltag = marker_detector.apriltag_detector:main',
-            'localization = marker_detector.localization:main'
+            'oak_apriltag= marker_detector.oak_apriltag_detector:main',
+            'localization = marker_detector.localization:main',
+            'odometry = odometry.odometry:main'
         ],
     },
 )

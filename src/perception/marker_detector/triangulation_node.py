@@ -11,8 +11,8 @@ import os
 
 # Import solvers
 # from .solvers.least_squares_solver import LeastSquaresSolver
-from solvers.weighted_least_squares import WeightedLeastSquaresSolver
-from solvers.new_solver import LeastSquaresSolver
+from .solvers.weighted_least_squares import WeightedLeastSquaresSolver
+from .solvers.new_solver import LeastSquaresSolver
 
 SOLVER_CLASSES = {
     'least_squares': LeastSquaresSolver,
@@ -52,7 +52,7 @@ class TriangulationNode(Node):
         self.sub = self.create_subscription(
             MarkerPoseArray, input_topic, self.marker_callback, 10)
         self.get_logger().info(f"Subscribed to marker topic: {input_topic}")
-        self.pub = self.create_publisher(PoseStamped, '/robot_pose', 10)
+        self.pub = self.create_publisher(PoseStamped, '/robot_pose_raw', 10)
 
     # -----------------------------------------------------
 

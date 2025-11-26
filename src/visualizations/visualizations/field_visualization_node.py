@@ -401,7 +401,7 @@ class FieldVisualizationNode(Node):
         vx, vy = self.latest_vector
 
         # Scale for visibility — field is large, actual vector is unit length
-        scale = 300  # pixels to draw
+        scale = 60  # pixels to draw
 
         # Convert (vx, vy) from world meters to pixel direction
         end_u = int(rover_u + vx * scale)
@@ -413,9 +413,9 @@ class FieldVisualizationNode(Node):
             img,
             (rover_u, rover_v),
             (end_u, end_v),
-            (0, 0, 255),  # red arrow
+            (255, 0, 0),  # red arrow
             3,
-            tipLength=0.2,
+            tipLength=0.1,
         )
 
     # ------------------------------------------------------------------ #

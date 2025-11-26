@@ -37,6 +37,9 @@ setup(
             'teleop = telecontrol.teleop_gui:main',
             'follow = curling_control.follow:main',
             "curling_gaze = curling_control.follow:main"
+            'dwa_strategy = curling_control.navigation_strategies.dwa_strategy:main',
+            'potential_field_strategy = curling_control.navigation_strategies.potential_field_strategy:main',
+            'direct_goal_strategy = curling_control.navigation_strategies.direct_goal_strategy:main',
         ],
     },
 )

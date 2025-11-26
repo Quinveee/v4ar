@@ -55,4 +55,15 @@ class LeastSquaresSolver(BaseTriangulationSolver):
             else:
                 chosen = (x_int2, y_int2)
 
-        return np.array(chosen)
+        x_r, y_r = chosen
+
+        # --- Step 3: Estimate yaw based on marker geometry ---
+        # In world frame: direction from marker 1 to marker 2
+        world_angle = np.arctan2(y2 - y1, x2 - x1)
+        # In robot frame: direction from robot to marker 2
+        robot_angle = np.arctan2(y2 - y_r, x2 - x_r)
+        # The yaw difference between world and robot geometry
+        yaw = world_angle - robot_angle
+        yaw = np.arctan2(np.sin(yaw), np.cos(yaw))  # normalize
+
+        return np.array([x_r, y_r, yaw])

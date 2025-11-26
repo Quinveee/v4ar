@@ -70,7 +70,7 @@ class TriangulationNode(Node):
             MarkerPoseArray, oak_topic, self.oak_marker_callback, 10)
         self.get_logger().info(f"Subscribed to OAK markers: {oak_topic}")
         
-        self.pub = self.create_publisher(PoseStamped, '/robot_pose', 10)
+        self.pub = self.create_publisher(PoseStamped, '/robot_pose_raw', 10)
         
         self.get_logger().info(f"Weights: OAK={self.oak_weight:.1f}x, Mono={self.mono_weight:.1f}x")
 

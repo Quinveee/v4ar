@@ -88,8 +88,8 @@ class AprilTagVisualizationNode(Node):
         self.detection_history = []
         self.use_adaptive_scales = True
         
-        self.color_sub = self.create_subscription(Image, '/color/image', self.color_callback, 10)
-        self.color_info_sub = self.create_subscription(CameraInfo, '/color/camera_info', self.camera_info_callback, 1)
+        self.color_sub = self.create_subscription(Image, '/oak/rgb/image_raw', self.color_callback, 10)
+        self.color_info_sub = self.create_subscription(CameraInfo, '/oak/rgb/camera_info', self.camera_info_callback, 1)
 
         self.pub = self.create_publisher(MarkerPoseArray, '/oak/detected_markers', 10)
 
@@ -156,6 +156,7 @@ class AprilTagVisualizationNode(Node):
             self.K = K_new
             self.camera_info_received = True
             self.get_logger().info(f"Camera calibration loaded: {w}x{h}")
+            self.get_logger().info(f"Publisher created for /oak/detected_markers")
             self.destroy_subscription(self.color_info_sub)
 
 
@@ -198,6 +199,12 @@ class AprilTagVisualizationNode(Node):
         ALWAYS overrides low-res detections.
         """
         if not self._check_data_ready():
+            if not hasattr(self, '_logged_data_not_ready'):
+                self.get_logger().warn(
+                    f"Data not ready: color_msg={self.current_color_msg is not None}, "
+                    f"camera_info={self.camera_info_received}"
+                )
+                self._logged_data_not_ready = True
             return
         
         # Adaptive scaling
@@ -416,6 +423,19 @@ class AprilTagVisualizationNode(Node):
                 if marker_id in self.marker_buffer:
                     marker_array_msg.markers.append(self.marker_buffer[marker_id]['marker'])
 
+        # Always publish, even if empty (so topic appears)
+        self.pub.publish(marker_array_msg)
+        
+        # Log periodically for debugging
+        if not hasattr(self, '_publish_count'):
+            self._publish_count = 0
+        self._publish_count += 1
+        if self._publish_count <= 3 or self._publish_count % 30 == 0:
+            self.get_logger().info(
+                f"Published /oak/detected_markers: {len(marker_array_msg.markers)} markers "
+                f"(publish #{self._publish_count})"
+            )
+
         # Visualize
         for marker_msg in marker_array_msg.markers:
             cx, cy = int(marker_msg.center_x), int(marker_msg.center_y)
@@ -431,8 +451,6 @@ class AprilTagVisualizationNode(Node):
                        (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             cv2.putText(detected_vis, f"D={marker_msg.distance:.2f}m",
                        (x_min, y_max + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-
-        self.pub.publish(marker_array_msg)
         
         if not self.no_gui:
             display_det = cv2.resize(detected_vis, (640, 480))

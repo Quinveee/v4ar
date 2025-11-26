@@ -24,9 +24,11 @@ setup(
     },
     entry_points={
         'console_scripts': [
-       'visualization_node = visualizations.line_visualization_node:main',
-       'angle_plot_node = visualizations.angle_plot_node:main',     
-        'field_visualization_node = visualizations.field_visualization_node:main',  
+        'visualization_node = visualizations.line_visualization_node:main',
+        'angle_plot_node = visualizations.angle_plot_node:main',     
+        'field_visualization_node = visualizations.field_visualization_node:main',
+        'field = visualizations.field_visualization_node:main',
+        'odometry_trajectory_visualization_node = visualizations.odometry_trajectory_visualization_node:main',
 
         ],
     },

@@ -61,9 +61,9 @@ class NavigationWithAvoidanceNode(Node):
         super().__init__('navigation_with_avoidance_node')
 
         # Declare ROS parameters with defaults
-        self.declare_parameter("strategy_type", "potential_field")
-        self.declare_parameter("target_x", 1.0)
-        self.declare_parameter("target_y", 1.0)
+        self.declare_parameter("strategy_type", "dwa")
+        self.declare_parameter("target_x", 0.0)
+        self.declare_parameter("target_y", 3.0)
         self.declare_parameter("safe_distance", 1.2)
         self.declare_parameter("repulse_strength", 1.5)
         self.declare_parameter("goal_tolerance", 0.1)
@@ -72,8 +72,6 @@ class NavigationWithAvoidanceNode(Node):
 
         # Get parameter values
         strategy_type = self.get_parameter("strategy_type").value
-        self.target_x = self.get_parameter("target_x").value
-        self.target_y = self.get_parameter("target_y").value
 
         # Initialize or create strategy
         if strategy is None:
@@ -118,11 +116,15 @@ class NavigationWithAvoidanceNode(Node):
         # Control loop timer (20 Hz)
         self.timer = self.create_timer(0.05, self.control_loop)
 
+        # Log initialization info
+        target_x = self.get_parameter("target_x").value
+        target_y = self.get_parameter("target_y").value
+
         self.get_logger().info(
             f"NavigationWithAvoidanceNode initialized with strategy: {strategy_type}"
         )
         self.get_logger().info(
-            f"Target: ({self.target_x:.2f}, {self.target_y:.2f})"
+            f"Target: ({target_x:.2f}, {target_y:.2f})"
         )
 
     # -------------------------------------------------------------------
@@ -179,13 +181,24 @@ class NavigationWithAvoidanceNode(Node):
         if self.robot_x is None:
             return
 
+        # Read target parameters dynamically (allows live updates)
+        target_x = self.get_parameter("target_x").value
+        target_y = self.get_parameter("target_y").value
+
+        # Debug logging (throttled)
+        self.get_logger().debug(
+            f"Robot at ({self.robot_x:.2f}, {self.robot_y:.2f}), "
+            f"Target: ({target_x:.2f}, {target_y:.2f})",
+            throttle_duration_sec=1.0
+        )
+
         # Delegate control computation to the strategy
         cmd, heading_vec, goal_reached = self.strategy.compute_control(
             robot_x=self.robot_x,
             robot_y=self.robot_y,
             robot_yaw=self.robot_yaw,
-            target_x=self.target_x,
-            target_y=self.target_y,
+            target_x=target_x,
+            target_y=target_y,
             obstacles=self.obstacles
         )
 
@@ -212,7 +225,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

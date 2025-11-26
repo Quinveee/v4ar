@@ -62,8 +62,9 @@ class RoverDetectorWithPose(Node):
         self.next_rover_id = 0
 
         # Subscribers
-        self.create_subscription(Image, '/color/image', self.rgb_callback, 10)
-        self.create_subscription(Image, '/stereo/depth', self.depth_callback, 10)
+        self.create_subscription(Image, '/oak/stereo/image_raw', self.rgb_callback, 10)
+        # self.create_subscription(Image, '/oak/stereo/image_raw/compressed', self.rgb_callback, 10)
+        self.create_subscription(Image, '/oak/stereo/image_raw/compressed', self.depth_callback, 10)
         self.create_subscription(CameraInfo, '/color/camera_info', self.camera_info_callback, 10)
 
         # Publishers

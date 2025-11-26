@@ -1,14 +1,19 @@
 import numpy as np
+import time
 from .base_strategy import BaseLocalizationStrategy
 
 class KalmanLocalization(BaseLocalizationStrategy):
     """Kalman filter–based localization strategy."""
 
-    def __init__(self):
+    def __init__(self, measurement_interval=10.0):
         super().__init__()
         self.P = np.eye(3) * 0.1      # Covariance matrix
         self.Q = np.diag([0.02, 0.02, 0.01])  # Process noise
         self.R = np.diag([0.05, 0.05])        # Measurement noise
+        
+        # Measurement throttling
+        self.measurement_interval = measurement_interval  # seconds
+        self.last_measurement_time = 0.0
 
     def predict(self, v, w, dt):
         if dt <= 0:
@@ -28,6 +33,14 @@ class KalmanLocalization(BaseLocalizationStrategy):
         self.P = F @ self.P @ F.T + self.Q
 
     def update(self, measurement):
+        current_time = time.time()
+        
+        # Only update if enough time has passed
+        if current_time - self.last_measurement_time < self.measurement_interval:
+            return  # Skip this measurement
+            
+        self.last_measurement_time = current_time
+        
         z = np.array([measurement.pose.position.x, measurement.pose.position.y])
         H = np.array([[1, 0, 0],
                       [0, 1, 0]])
