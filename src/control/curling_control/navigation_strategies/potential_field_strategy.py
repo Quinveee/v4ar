@@ -28,7 +28,9 @@ class PotentialFieldStrategy(BaseNavigationStrategy):
         goal_tolerance: float = 0.1,
         max_linear_velocity: float = 0.1,
         angular_gain: float = 0.5,
-        min_speed_scale: float = 0.1
+        min_speed_scale: float = 0.1,
+        *args, 
+        **kwargs
     ):
         """
         Initialize the potential field strategy.
