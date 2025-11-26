@@ -11,8 +11,8 @@ class LeastSquaresSolver(BaseTriangulationSolver):
             raise ValueError("Need at least two markers for triangulation")
 
         (id1, d1), (id2, d2) = detections[:2]
-        x1, y1 = marker_map[id1]
-        x2, y2 = marker_map[id2]
+        x1, y1, _ = marker_map[id1]
+        x2, y2, _ = marker_map[id2]
 
         dx, dy = x2 - x1, y2 - y1
         d = np.hypot(dx, dy)

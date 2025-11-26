@@ -1,6 +1,15 @@
 import numpy as np
+import math
 import time
 from .base_strategy import BaseLocalizationStrategy
+
+
+def quaternion_to_yaw(x, y, z, w):
+    """Convert quaternion to yaw angle in radians."""
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return yaw
 
 
 class DeadReckoningLocalization(BaseLocalizationStrategy):
@@ -53,7 +62,12 @@ class DeadReckoningLocalization(BaseLocalizationStrategy):
         if not self.initialized:
             self.x = measurement.pose.position.x
             self.y = measurement.pose.position.y
-            self.theta = 0.0  # We don’t have yaw from AprilTags
+            # Extract yaw from quaternion
+            qx = measurement.pose.orientation.x
+            qy = measurement.pose.orientation.y
+            qz = measurement.pose.orientation.z
+            qw = measurement.pose.orientation.w
+            self.theta = quaternion_to_yaw(qx, qy, qz, qw)
             self.initialized = True
             self.last_cmd_time = current_time
             return
@@ -62,7 +76,12 @@ class DeadReckoningLocalization(BaseLocalizationStrategy):
         if self.last_cmd_time is None or (current_time - self.last_cmd_time > self.cmd_timeout):
             self.x = measurement.pose.position.x
             self.y = measurement.pose.position.y
-            # Keep current heading estimate, since AprilTag gives no orientation
+            # Extract yaw from quaternion
+            qx = measurement.pose.orientation.x
+            qy = measurement.pose.orientation.y
+            qz = measurement.pose.orientation.z
+            qw = measurement.pose.orientation.w
+            self.theta = quaternion_to_yaw(qx, qy, qz, qw)
             self.last_cmd_time = current_time
 
     def get_pose(self):

@@ -64,7 +64,7 @@ class RoverDetectorWithPose(Node):
         # Subscribers
         self.create_subscription(Image, '/oak/stereo/image_raw', self.rgb_callback, 10)
         # self.create_subscription(Image, '/oak/stereo/image_raw/compressed', self.rgb_callback, 10)
-        self.create_subscription(Image, '/oak/stereo/image_raw/compressed', self.depth_callback, 10)
+        self.create_subscription(Image, '/oak/depth/image_raw', self.depth_callback, 10)
         self.create_subscription(CameraInfo, '/color/camera_info', self.camera_info_callback, 10)
 
         # Publishers

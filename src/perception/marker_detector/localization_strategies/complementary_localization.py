@@ -1,6 +1,15 @@
 import math
 from .base_strategy import BaseLocalizationStrategy
 
+
+def quaternion_to_yaw(x, y, z, w):
+    """Convert quaternion to yaw angle in radians."""
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return yaw
+
+
 class ComplementaryLocalization(BaseLocalizationStrategy):
     """Simpler low-pass filtered localization."""
 

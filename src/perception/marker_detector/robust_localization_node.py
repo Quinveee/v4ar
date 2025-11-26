@@ -21,6 +21,14 @@ def yaw_to_quaternion(yaw: float):
     return 0.0, 0.0, qz, qw
 
 
+def quaternion_to_yaw(x, y, z, w):
+    """Convert quaternion to yaw angle in radians."""
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return yaw
+
+
 class RobustLocalizationNode(Node):
     """
     Fuses triangulated pose (/robot_pose) with wheel commands (/cmd_vel).
@@ -136,14 +144,19 @@ class RobustLocalizationNode(Node):
             # First-ever measurement: initialize state
             self.x = msg.pose.position.x
             self.y = msg.pose.position.y
-            self.theta = 0.0  # we don't get theta from triangulation yet
+            # Extract yaw from quaternion
+            qx = msg.pose.orientation.x
+            qy = msg.pose.orientation.y
+            qz = msg.pose.orientation.z
+            qw = msg.pose.orientation.w
+            self.theta = quaternion_to_yaw(qx, qy, qz, qw)
             self.last_update_time = meas_time
             self.last_marker_time = meas_time
             self.has_pose = True
             self.frames_since_marker = 0
 
             self.get_logger().info(
-                f"Initialized pose from triangulation: x={self.x:.2f}, y={self.y:.2f}"
+                f"Initialized pose from triangulation: x={self.x:.2f}, y={self.y:.2f}, theta={self.theta:.2f}"
             )
             return
 
@@ -153,6 +166,12 @@ class RobustLocalizationNode(Node):
         # 2. Check difference between prediction and measurement
         meas_x = msg.pose.position.x
         meas_y = msg.pose.position.y
+        # Extract yaw from quaternion
+        qx = msg.pose.orientation.x
+        qy = msg.pose.orientation.y
+        qz = msg.pose.orientation.z
+        qw = msg.pose.orientation.w
+        meas_theta = quaternion_to_yaw(qx, qy, qz, qw)
 
         dx = meas_x - self.x
         dy = meas_y - self.y
@@ -171,7 +190,11 @@ class RobustLocalizationNode(Node):
         alpha = self.measurement_alpha
         self.x = (1.0 - alpha) * self.x + alpha * meas_x
         self.y = (1.0 - alpha) * self.y + alpha * meas_y
-        # theta stays from motion model (we don't have heading from triangulation yet)
+        # Fuse theta as well (handle angle wrapping)
+        theta_diff = meas_theta - self.theta
+        # Normalize angle difference to [-pi, pi]
+        theta_diff = math.atan2(math.sin(theta_diff), math.cos(theta_diff))
+        self.theta = self.theta + alpha * theta_diff
 
         self.last_update_time = meas_time
         self.last_marker_time = meas_time

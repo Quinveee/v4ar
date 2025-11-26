@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import math
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Vector3
@@ -10,6 +11,15 @@ from ament_index_python.packages import get_package_share_directory
 import cv2
 import numpy as np
 import yaml
+
+
+def quaternion_to_yaw(x, y, z, w):
+    """Convert quaternion to yaw angle in radians."""
+    # yaw (z-axis rotation)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return yaw
 
 # --- Field drawing constants and helper ---
 # Dimensions in mm (soccer field spec used for drawing)
@@ -418,6 +428,62 @@ class FieldVisualizationNode(Node):
             tipLength=0.1,
         )
 
+    def draw_robot_orientation(self, img, rover_u, rover_v, yaw):
+        """Draw an arrow showing the robot's orientation (yaw) and display the angle."""
+        # Arrow length in pixels
+        arrow_length = 80
+
+        # Calculate arrow endpoint based on yaw
+        # Note: yaw is in world frame, need to account for coordinate transform
+        # In world frame: yaw=0 points in +X direction (right in world coords)
+        # We need to transform this to pixel coordinates
+
+        # World coordinates: X is forward, Y is left
+        # Our pixel transform: x_std = A - Y_world, y_std = X_world
+        # So we need to rotate the yaw accordingly
+
+        # Calculate direction in world frame
+        dx_world = math.cos(yaw)
+        dy_world = math.sin(yaw)
+
+        # Transform to pixel direction
+        # Since x_std = A - y_world and y_std = x_world
+        # dx_pixel corresponds to -dy_world
+        # dy_pixel corresponds to dx_world (but inverted for screen coords)
+        end_u = int(rover_u - dy_world * arrow_length)
+        end_v = int(rover_v - dx_world * arrow_length)
+
+        # Draw the orientation arrow (cyan color to distinguish from heading vector)
+        cv2.arrowedLine(
+            img,
+            (rover_u, rover_v),
+            (end_u, end_v),
+            (255, 255, 0),  # cyan arrow
+            4,
+            tipLength=0.3,
+        )
+
+        # Display the yaw angle in degrees near the robot
+        yaw_deg = math.degrees(yaw)
+        cv2.putText(
+            img,
+            f"Yaw: {yaw_deg:.1f}°",
+            (rover_u + 15, rover_v + 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),  # black outline
+            3,
+        )
+        cv2.putText(
+            img,
+            f"Yaw: {yaw_deg:.1f}°",
+            (rover_u + 15, rover_v + 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 0),  # cyan text
+            2,
+        )
+
     # ------------------------------------------------------------------ #
     # Render loop
     # ------------------------------------------------------------------ #
@@ -452,6 +518,13 @@ class FieldVisualizationNode(Node):
         x_m = self.latest_pose.pose.position.x
         y_m = self.latest_pose.pose.position.y
 
+        # Extract yaw from quaternion
+        qx = self.latest_pose.pose.orientation.x
+        qy = self.latest_pose.pose.orientation.y
+        qz = self.latest_pose.pose.orientation.z
+        qw = self.latest_pose.pose.orientation.w
+        yaw = quaternion_to_yaw(qx, qy, qz, qw)
+
         # Convert to mm for mapping
         x_mm = x_m * 1000.0
         y_mm = y_m * 1000.0
@@ -469,6 +542,9 @@ class FieldVisualizationNode(Node):
             (255, 255, 255),
             2,
         )
+
+        # Draw robot orientation arrow (from triangulation yaw)
+        self.draw_robot_orientation(field, rover_u, rover_v, yaw)
 
         # Draw steering vector arrow
         self.draw_heading_vector(field, rover_u, rover_v)

@@ -1,0 +1,73 @@
+# robot_localization EKF Configuration
+# This file configures robot_localization's ekf_node
+# to fuse multiple sensors for accurate odometry
+
+/**:
+  ros__parameters:
+    # Frequency of the filter (Hz)
+    frequency: 30.0
+    
+    # Frame IDs
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_footprint
+    world_frame: odom  # Start in odom frame, can be changed to map if needed
+    
+    # Two-dimensional mode (set to false for 3D)
+    two_d_mode: true
+    
+    # Sensor fusion configuration
+    # Set to true to enable each sensor source
+    
+    # rf2o_laser_odometry input
+    odom0: /odom_rf2o
+    odom0_config: [true,  true,  true,   # x, y, z
+                    false, false, false,  # roll, pitch, yaw
+                    false, false, false, # vx, vy, vz
+                    false, false, false, # vroll, vpitch, vyaw
+                    false, false, false] # ax, ay, az
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+    
+    # IMU input
+    imu0: /imu/data
+    imu0_config: [false, false, false,   # x, y, z
+                   false, false, true,    # roll, pitch, yaw
+                   false, false, false,   # vx, vy, vz
+                   false, false, true,    # vroll, vpitch, vyaw
+                   true,  true,  false]    # ax, ay, az
+    imu0_differential: false
+    imu0_relative: false
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 10
+    
+    # Process noise (how much we trust the motion model)
+    # Lower values = more trust in model
+    process_noise_covariance: [0.05, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                                0,    0.05, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                                0,    0,    0.06, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                                0,    0,    0,    0.03, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                                0,    0,    0,    0,    0.03, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                                0,    0,    0,    0,    0,    0.06, 0,    0,    0,    0,    0,    0,    0,    0,    0,
+                                0,    0,    0,    0,    0,    0,    0.025, 0,    0,    0,    0,    0,    0,    0,    0,
+                                0,    0,    0,    0,    0,    0,    0,    0.025, 0,    0,    0,    0,    0,    0,    0,
+                                0,    0,    0,    0,    0,    0,    0,    0,    0.04, 0,    0,    0,    0,    0,    0,
+                                0,    0,    0,    0,    0,    0,    0,    0,    0,    0.01, 0,    0,    0,    0,    0,
+                                0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0.01, 0,    0,    0,    0,
+                                0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0.015, 0,    0,    0,
+                                0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0.01, 0,    0,
+                                0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0.01, 0,
+                                0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0.015]
+    
+    # Initial estimate error covariance
+    initial_state: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    
+    # Output topic
+    odom_frame: odom
+    base_link_frame: base_footprint
+    
+    # Print diagnostics
+    print_diagnostics: true
+    diagnostic_updater_period: 1.0
+

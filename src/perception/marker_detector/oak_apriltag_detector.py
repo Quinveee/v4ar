@@ -88,8 +88,19 @@ class AprilTagVisualizationNode(Node):
         self.detection_history = []
         self.use_adaptive_scales = True
         
-        self.color_sub = self.create_subscription(Image, '/oak/rgb/image_raw', self.color_callback, 10)
-        self.color_info_sub = self.create_subscription(CameraInfo, '/oak/rgb/camera_info', self.camera_info_callback, 1)
+        # Track start time for delayed warnings
+        self._start_time = None
+        
+        self.color_sub = self.create_subscription(
+            Image, '/oak/rgb/image_raw', self.color_callback, 10
+        )
+        self.color_info_sub = self.create_subscription(
+            CameraInfo, '/oak/rgb/camera_info', self.camera_info_callback, 1
+        )
+        
+        self.get_logger().info(
+            f"Subscribed to /oak/rgb/image_raw and /oak/rgb/camera_info"
+        )
 
         self.pub = self.create_publisher(MarkerPoseArray, '/oak/detected_markers', 10)
 
@@ -125,6 +136,9 @@ class AprilTagVisualizationNode(Node):
         
         self.get_logger().info(f"AprilTag detector initialized: {self.tag_family}")
         self.get_logger().info(f"Tag size: {self.tag_size}m")
+        
+        # Initialize start time after node is fully set up
+        self._start_time = self.get_clock().now()
 
         if not self.no_gui:
             cv2.namedWindow("Detected AprilTags", cv2.WINDOW_NORMAL)
@@ -139,9 +153,18 @@ class AprilTagVisualizationNode(Node):
 
 
     def color_callback(self, msg: Image):
+        if self.current_color_msg is None:
+            self.get_logger().info(
+                f"Received first image message: {msg.width}x{msg.height}, "
+                f"encoding={msg.encoding}, frame_id={msg.header.frame_id}"
+            )
         self.current_color_msg = msg
 
     def camera_info_callback(self, msg: CameraInfo):
+        self.get_logger().info(
+            f"Received camera_info message: {msg.width}x{msg.height}, "
+            f"frame_id={msg.header.frame_id}"
+        )
         if not self.camera_info_received:
             self.K = np.array(msg.k).reshape((3, 3))
             self.D = np.array(msg.d)
@@ -177,6 +200,7 @@ class AprilTagVisualizationNode(Node):
         Used to discover new tags quickly, but will be overridden by high-res.
         """
         if not self._check_data_ready():
+            # Don't log here - high_res will log if needed
             return
         
         detections = self._detect_at_resolution(120)
@@ -199,12 +223,17 @@ class AprilTagVisualizationNode(Node):
         ALWAYS overrides low-res detections.
         """
         if not self._check_data_ready():
-            if not hasattr(self, '_logged_data_not_ready'):
-                self.get_logger().warn(
-                    f"Data not ready: color_msg={self.current_color_msg is not None}, "
-                    f"camera_info={self.camera_info_received}"
-                )
-                self._logged_data_not_ready = True
+            # Only warn after 2 seconds to give callbacks time to receive messages
+            if self._start_time is not None:
+                elapsed = (self.get_clock().now() - self._start_time).nanoseconds / 1e9
+                if elapsed > 2.0 and not hasattr(self, '_logged_data_not_ready'):
+                    self.get_logger().warn(
+                        f"Data not ready after {elapsed:.1f}s: "
+                        f"color_msg={self.current_color_msg is not None}, "
+                        f"camera_info={self.camera_info_received}. "
+                        f"Check if topics /oak/rgb/image_raw and /oak/rgb/camera_info are publishing."
+                    )
+                    self._logged_data_not_ready = True
             return
         
         # Adaptive scaling
@@ -487,6 +516,9 @@ def main(args=None):
         buffer_alpha=parsed.buffer_alpha
     )
 
+    node.get_logger().info("Node initialized, starting to spin...")
+    node.get_logger().info("Waiting for messages on /oak/rgb/image_raw and /oak/rgb/camera_info")
+    
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

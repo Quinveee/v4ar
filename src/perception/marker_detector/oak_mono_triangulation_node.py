@@ -160,31 +160,43 @@ class TriangulationNode(Node):
             # Check if solver supports weights
             if hasattr(self.solver, 'solve_weighted'):
                 # Use weighted solver (detections with weights)
-                xy = self.solver.solve_weighted(fused_detections, self.marker_map)
+                result = self.solver.solve_weighted(fused_detections, self.marker_map)
             else:
                 # Fallback: Use regular solver (just use id and distance, ignore weights)
                 detections = [(m_id, dist) for m_id, dist, _ in fused_detections]
-                xy = self.solver.solve(detections, self.marker_map)
+                result = self.solver.solve(detections, self.marker_map)
                 self.get_logger().warn(
                     "Solver doesn't support weights, using unweighted triangulation",
                     throttle_duration_sec=10.0
                 )
-            
-            x, y = xy
-            
+
+            # Handle both 2D (x, y) and 3D (x, y, yaw) outputs
+            if len(result) == 3:
+                x, y, yaw = result
+            else:
+                x, y = result
+                yaw = 0.0
+
             # Debug logging
-            self.get_logger().info(f"Triangulated: x={x:.4f}, y={y:.4f}")
-            
+            self.get_logger().info(f"Triangulated: x={x:.4f}, y={y:.4f}, yaw={yaw:.4f}")
+
             pose_msg = PoseStamped()
             pose_msg.header = header
             pose_msg.header.frame_id = "world"
             pose_msg.pose.position.x = float(x)
             pose_msg.pose.position.y = float(y)
-            pose_msg.pose.orientation.w = 1.0
-            
+
+            # Convert yaw to quaternion
+            import math
+            half_yaw = yaw / 2.0
+            pose_msg.pose.orientation.x = 0.0
+            pose_msg.pose.orientation.y = 0.0
+            pose_msg.pose.orientation.z = math.sin(half_yaw)
+            pose_msg.pose.orientation.w = math.cos(half_yaw)
+
             self.pub.publish(pose_msg)
             self.get_logger().info(
-                f"Robot position: x={x:.2f}, y={y:.2f}",
+                f"Robot position: x={x:.2f}, y={y:.2f}, yaw={yaw:.2f}",
                 throttle_duration_sec=0.5
             )
             

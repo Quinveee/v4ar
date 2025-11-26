@@ -30,7 +30,7 @@ class LeastSquaresSolver(BaseTriangulationSolver):
         """
         err = 0.0
         for mid, dist_meas in detections:
-            mx, my = marker_map[mid]
+            mx, my, _ = marker_map[mid]
             dist_pred = np.hypot(x - mx, y - my)
             err += (dist_pred - dist_meas) ** 2
 
@@ -46,8 +46,8 @@ class LeastSquaresSolver(BaseTriangulationSolver):
 
         # Use the first two detections to define the two-circle intersection
         (id1, d1), (id2, d2) = detections[:2]
-        x1, y1 = marker_map[id1]
-        x2, y2 = marker_map[id2]
+        x1, y1, _ = marker_map[id1]
+        x2, y2, _ = marker_map[id2]
 
         dx, dy = x2 - x1, y2 - y1
         d = np.hypot(dx, dy)

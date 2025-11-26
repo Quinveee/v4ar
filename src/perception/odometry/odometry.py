@@ -3,6 +3,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Imu
 from rclpy.time import Time
 import math
 
@@ -10,7 +11,9 @@ try:
     # Try relative import (works when installed as package via ros2 run)
     from .odometry_strategies import (
         CmdVelStrategy,
-        RF2OStrategy
+        LidarStrategy,
+        SensorFusionStrategy,
+        RobotLocalizationStrategy
     )
 except ImportError:
     # Fallback to absolute import (works when running directly)
@@ -23,12 +26,16 @@ except ImportError:
         sys.path.insert(0, parent_dir)
     from odometry.odometry_strategies import (
         CmdVelStrategy,
-        RF2OStrategy
+        LidarStrategy,
+        SensorFusionStrategy,
+        RobotLocalizationStrategy
     )
 
 STRATEGIES = {
     "cmd_vel": CmdVelStrategy,
-    "rf2o": RF2OStrategy,
+    "lidar": LidarStrategy,
+    "sensor_fusion": SensorFusionStrategy,
+    "robot_localization": RobotLocalizationStrategy,
 }
 
 
@@ -52,6 +59,9 @@ class OdometryNode(Node):
         self.declare_parameter("strategy_type", "cmd_vel")
         self.declare_parameter("publish_rate", 10.0)
         self.declare_parameter("triangulation_topic", "/robot_pose_raw")
+        self.declare_parameter("rf2o_odom_topic", "/odom_rf2o")
+        self.declare_parameter("imu_topic", "/imu/data")
+        self.declare_parameter("robot_localization_topic", "/odometry/filtered")
 
         strategy_type = self.get_parameter("strategy_type").value
         Strategy = STRATEGIES.get(strategy_type, CmdVelStrategy)
@@ -74,9 +84,33 @@ class OdometryNode(Node):
             self.cmd_vel_sub = self.create_subscription(
                 Twist, "/cmd_vel", self.cmd_vel_callback, 10
             )
-        elif strategy_type == "rf2o":
-            self.rf2o_sub = self.create_subscription(
-                Odometry, "/rf2o_laser_odometry", self.rf2o_callback, 10
+        elif strategy_type == "lidar":
+            rf2o_topic = self.get_parameter("rf2o_odom_topic").value
+            self.rf2o_odom_sub = self.create_subscription(
+                Odometry, rf2o_topic, self.lidar_callback, 10
+            )
+            self.get_logger().info(f"Subscribing to rf2o odometry: {rf2o_topic}")
+        elif strategy_type == "sensor_fusion":
+            # Sensor fusion uses multiple sensors
+            rf2o_topic = self.get_parameter("rf2o_odom_topic").value
+            imu_topic = self.get_parameter("imu_topic").value
+            
+            self.rf2o_odom_sub = self.create_subscription(
+                Odometry, rf2o_topic, self.rf2o_callback, 10
+            )
+            self.imu_sub = self.create_subscription(
+                Imu, imu_topic, self.imu_callback, 10
+            )
+            self.get_logger().info(f"Sensor fusion: subscribing to rf2o: {rf2o_topic}, IMU: {imu_topic}")
+        elif strategy_type == "robot_localization":
+            # robot_localization strategy subscribes to filtered odometry
+            rl_topic = self.get_parameter("robot_localization_topic").value
+            self.rl_odom_sub = self.create_subscription(
+                Odometry, rl_topic, self.robot_localization_callback, 10
+            )
+            self.get_logger().info(
+                f"robot_localization strategy: subscribing to filtered odometry: {rl_topic}\n"
+                f"Make sure robot_localization ekf_localization_node is running!"
             )
 
         # Publisher - consistent topic name
@@ -106,6 +140,10 @@ class OdometryNode(Node):
             self.get_logger().info(
                 f"Initialized odometry from triangulation: x={x:.2f}, y={y:.2f}, theta={theta:.2f}"
             )
+        else:
+            # For sensor fusion, use triangulation as absolute position correction
+            if self.strategy_type == "sensor_fusion":
+                self.strategy.update_triangulation(msg)
 
     def cmd_vel_callback(self, msg: Twist):
         """Handle velocity commands."""
@@ -121,9 +159,28 @@ class OdometryNode(Node):
                     f"Received cmd_vel: v={msg.linear.x:.2f}, w={msg.angular.z:.2f}"
                 )
 
-    def rf2o_callback(self, msg: Odometry):
-        """Handle rf2o laser odometry."""
+    def lidar_callback(self, msg: Odometry):
+        """Handle rf2o laser odometry messages (for lidar strategy)."""
         if self.strategy.is_initialized():
+            self.strategy.update(msg)
+    
+    def rf2o_callback(self, msg: Odometry):
+        """Handle rf2o laser odometry messages (for sensor fusion strategy)."""
+        if self.strategy_type == "sensor_fusion" and self.strategy.is_initialized():
+            now = self.get_clock().now()
+            current_time = now.nanoseconds / 1e9
+            self.strategy.update_rf2o(msg, current_time)
+    
+    def imu_callback(self, msg: Imu):
+        """Handle IMU messages (for sensor fusion strategy)."""
+        if self.strategy_type == "sensor_fusion" and self.strategy.is_initialized():
+            now = self.get_clock().now()
+            current_time = now.nanoseconds / 1e9
+            self.strategy.update_imu(msg, current_time)
+    
+    def robot_localization_callback(self, msg: Odometry):
+        """Handle robot_localization filtered odometry messages."""
+        if self.strategy_type == "robot_localization" and self.strategy.is_initialized():
             self.strategy.update(msg)
 
     def timer_callback(self):

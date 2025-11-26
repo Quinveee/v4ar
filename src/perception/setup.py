@@ -16,6 +16,8 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob(os.path.join('launch', '*_launch.py'))),        
         (os.path.join('share', package_name, 'config'), glob(os.path.join('config', '*.yaml'))),
+        (os.path.join('share', package_name, 'launch', 'odometry'), glob(os.path.join('launch', 'odometry_*.py'))),
+        (os.path.join('share', package_name, 'config', 'odometry'), glob(os.path.join('config', 'odometry_*.yaml'))),
     ],
     install_requires=['setuptools', "pupil-apriltags"],
     zip_safe=True,
@@ -37,7 +39,7 @@ setup(
             'apriltag = marker_detector.apriltag_detector:main',
             'oak_apriltag= marker_detector.oak_apriltag_detector:main',
             'localization = marker_detector.localization:main',
-            'odometry = odometry.odometry:main'
+            'odometry_node = odometry.odometry:main'
         ],
     },
 )
