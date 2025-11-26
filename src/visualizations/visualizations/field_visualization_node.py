@@ -119,6 +119,7 @@ class FieldVisualizationNode(Node):
     Subscribes:
         - /robot_pose      (geometry_msgs/PoseStamped)   [meters, world frame]
         - /detected_markers (perception_msgs/MarkerPoseArray)
+        - /oak/detected_markers (perception_msgs/MarkerPoseArray)  # NEW
 
     Uses marker_map from markers.yaml to:
         - draw all markers at their global coordinates,
@@ -221,6 +222,7 @@ class FieldVisualizationNode(Node):
         # Latest pose & detections
         self.latest_pose: PoseStamped | None = None
         self.latest_markers = []
+        self.latest_oak_markers = []  # NEW: OAK markers
 
         # --- Subscriptions ---
         # Determine the marker topic: explicit `marker_topic` param wins,
@@ -234,6 +236,11 @@ class FieldVisualizationNode(Node):
             PoseStamped, self.pose_topic, self.pose_callback, 10)
         self.markers_sub = self.create_subscription(
             MarkerPoseArray, marker_topic, self.markers_callback, 10)
+        
+        # NEW: OAK markers subscription
+        self.oak_markers_sub = self.create_subscription(
+            MarkerPoseArray, "/oak/detected_markers", self.oak_markers_callback, 10)
+        
         self.latest_vector = None
         self.vector_sub = self.create_subscription(
             Vector3,
@@ -243,7 +250,8 @@ class FieldVisualizationNode(Node):
         )
 
         self.get_logger().info(
-            f"FieldVisualization listening to pose: {self.pose_topic}, markers: {marker_topic}")
+            f"FieldVisualization listening to pose: {self.pose_topic}, "
+            f"mono markers: {marker_topic}, oak markers: /oak/detected_markers")
 
         # --- Timer for rendering ---
         self.timer = self.create_timer(0.1, self.render)  # 10 Hz
@@ -285,8 +293,13 @@ class FieldVisualizationNode(Node):
     def markers_callback(self, msg: MarkerPoseArray):
         self.latest_markers = msg.markers
 
+    def oak_markers_callback(self, msg: MarkerPoseArray):
+        """NEW: Callback for OAK camera markers"""
+        self.latest_oak_markers = msg.markers
+
     def vector_callback(self, msg: Vector3):
         self.latest_vector = (msg.x, msg.y)
+    
     # ------------------------------------------------------------------ #
     # Coordinate mapping
     # ------------------------------------------------------------------ #
@@ -349,7 +362,7 @@ class FieldVisualizationNode(Node):
             )
 
     def draw_marker_ranges_from_rover(self, img, rover_u, rover_v):
-        """Draw lines from rover to each currently detected marker with distance text."""
+        """Draw lines from rover to each currently detected marker (mono camera)."""
         if self.latest_markers is None:
             return
 
@@ -362,8 +375,8 @@ class FieldVisualizationNode(Node):
             y_mm = my_m * 1000.0
             mu, mv = self.world_to_pixel(x_mm, y_mm)
 
-            # line from rover -> marker
-            cv2.line(img, (rover_u, rover_v), (mu, mv), (0, 255, 255), 2)
+            # line from rover -> marker (CYAN for mono)
+            cv2.line(img, (rover_u, rover_v), (mu, mv), (255, 255, 0), 2)  # cyan
 
             # distance label around the midpoint of the line
             mid_u = int((rover_u + mu) / 2)
@@ -393,6 +406,53 @@ class FieldVisualizationNode(Node):
             radius_px = int(m.distance * 1000.0 * avg_px_per_mm)
             if radius_px > 0 and radius_px < 5000:  # avoid crazy values
                 cv2.circle(img, (mu, mv), radius_px, (128, 128, 255), 1)
+
+    def draw_oak_marker_ranges_from_rover(self, img, rover_u, rover_v):
+        """NEW: Draw lines from rover to OAK camera detected markers (different color)."""
+        if self.latest_oak_markers is None:
+            return
+
+        for m in self.latest_oak_markers:
+            if m.id not in self.marker_map:
+                continue
+
+            mx_m, my_m = self.marker_map[m.id]
+            x_mm = mx_m * 1000.0
+            y_mm = my_m * 1000.0
+            mu, mv = self.world_to_pixel(x_mm, y_mm)
+
+            # line from rover -> marker (GREEN for OAK, thicker to show priority)
+            cv2.line(img, (rover_u, rover_v), (mu, mv), (0, 255, 0), 3)  # green, thicker
+
+            # distance label around the midpoint of the line
+            mid_u = int((rover_u + mu) / 2)
+            mid_v = int((rover_v + mv) / 2) + 20  # Offset slightly to avoid overlap with mono
+            
+            # Draw with "OAK" prefix
+            cv2.putText(
+                img,
+                f"OAK {m.id} : {m.distance:.2f} m",
+                (mid_u + 5, mid_v - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                3,
+            )
+            cv2.putText(
+                img,
+                f"OAK {m.id} : {m.distance:.2f} m",
+                (mid_u + 5, mid_v - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),  # green text
+                1,
+            )
+
+            # Optional: draw distance circle (green tinted)
+            avg_px_per_mm = 0.5 * (self.px_per_mm_x + self.px_per_mm_y)
+            radius_px = int(m.distance * 1000.0 * avg_px_per_mm)
+            if radius_px > 0 and radius_px < 5000:
+                cv2.circle(img, (mu, mv), radius_px, (0, 255, 128), 2)  # green circle
 
     def draw_heading_vector(self, img, rover_u, rover_v):
         if self.latest_vector is None:
@@ -473,15 +533,19 @@ class FieldVisualizationNode(Node):
         # Draw steering vector arrow
         self.draw_heading_vector(field, rover_u, rover_v)
 
-        # Draw lines + distance annotations to visible markers
+        # Draw lines from mono camera markers (cyan, thin)
         self.draw_marker_ranges_from_rover(field, rover_u, rover_v)
+        
+        # NEW: Draw lines from OAK camera markers (green, thick)
+        self.draw_oak_marker_ranges_from_rover(field, rover_u, rover_v)
 
-        # Also show which marker IDs are currently seen
-        visible_ids = [
-            m.id for m in self.latest_markers if m.id in self.marker_map]
+        # Show which marker IDs are currently seen
+        mono_ids = [m.id for m in self.latest_markers if m.id in self.marker_map]
+        oak_ids = [m.id for m in self.latest_oak_markers if m.id in self.marker_map]
+        
         cv2.putText(
             field,
-            f"Visible markers: {visible_ids}",
+            f"Mono markers: {mono_ids}  |  OAK markers: {oak_ids}",
             (20, self.field_h - 20),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
