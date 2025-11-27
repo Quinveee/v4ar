@@ -9,7 +9,8 @@ setup(
     version='0.0.0',
     packages=find_packages(
         where='.',  # search in current dir
-        include=['marker_detector', "*marker_detector*",'line_detector', '*detector*', 'odometry', '*odometry*', 'launch', 'config']
+        include=['marker_detector', "*marker_detector*",'line_detector', '*detector*', 'odometry', '*odometry*', 'launch', 'config',
+                 "launch", "*launch*"]
     ),
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
@@ -39,7 +40,8 @@ setup(
             'apriltag = marker_detector.apriltag_detector:main',
             'oak_apriltag= marker_detector.oak_apriltag_detector:main',
             'localization = marker_detector.localization:main',
-            'odometry_node = odometry.odometry:main'
+            'odometry_node = odometry.odometry:main',
+            'oak_mono_triangulation = marker_detector.oak_mono_triangulation_node:main',
         ],
     },
 )

@@ -145,17 +145,30 @@ class AprilTagVisualizationNode(Node):
         self.new_K = None
 
         # AprilTag detector
+        # For rectified images with small distant markers, use high sensitivity settings:
+        # - decimate=0.25: Very sensitive (detects smaller tags at greater distances)
+        # - blur=0.5: Moderate blur to reduce noise while preserving edges
+        # - refine_edges=True: Improve corner localization accuracy for pose estimation
         self.detector = apriltag(
             self.tag_family,
             threads=4,
             maxhamming=2,
-            decimate=0.25,
+            decimate=0.25,  # High sensitivity for small distant markers
             blur=0.5,
             refine_edges=True,
             debug=False
         )
         self.get_logger().info(
             f"AprilTag detector initialized: {self.tag_family}"
+        )
+        self.get_logger().info(
+            f"Detector params: decimate=0.25 (high sensitivity), blur=0.5, refine_edges=True"
+        )
+        self.get_logger().info(
+            "Image preprocessing: CLAHE (clipLimit=3.0) + Subtle Unsharp Mask"
+        )
+        self.get_logger().info(
+            "Extended range strategy: Aggressive multiscale fallback (0.7x, 0.5x scales)"
         )
 
         # Subscription: processed image
@@ -448,20 +461,48 @@ class AprilTagVisualizationNode(Node):
         # Gray for detection
         gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
 
-        # Optional preprocessing
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        # Preprocessing to enhance small markers at distance (especially after rectification)
+        # Step 1: CLAHE for adaptive local contrast enhancement
+        # Higher clipLimit increases sensitivity to distant small markers
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         gray = clahe.apply(gray)
 
-        kernel = np.array([[-1, -1, -1],
-                           [-1,  9, -1],
-                           [-1, -1, -1]], dtype=np.float32)
-        postprocessed = cv2.filter2D(gray, -1, kernel)
+        # Step 2: Subtle unsharp mask to sharpen marker edges without over-processing
+        # This helps AprilTag edge detection without artifacts
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        gray = cv2.addWeighted(gray, 1.2, blurred, -0.2, 0)
+        gray = np.clip(gray, 0, 255).astype(np.uint8)
 
         # --- Detection: single scale or multiscale ---
+        # For extended range on rectified images, use intelligent fallback strategy
         if self.enable_multiscale:
             detections = self._detect_multiscale(gray)
         else:
+            # Single scale detection first
             detections = self.detector.detect(gray)
+            
+            # Aggressive fallback: if nothing detected, try multiple downsampled scales
+            # This is very effective for catching distant small markers
+            if len(detections) == 0 and gray.shape[0] > 64 and gray.shape[1] > 64:
+                # Try progressively smaller scales: 0.7x, 0.5x
+                for scale_factor in [0.7, 0.5]:
+                    gray_scaled = cv2.resize(
+                        gray, None, fx=scale_factor, fy=scale_factor, 
+                        interpolation=cv2.INTER_LINEAR
+                    )
+                    dets = self.detector.detect(gray_scaled)
+                    
+                    if dets:
+                        # Rescale back to original coordinates
+                        inv_scale = 1.0 / scale_factor
+                        for d in dets:
+                            for key in ['lb', 'rb', 'rt', 'lt', 'center']:
+                                if key in d:
+                                    d[key] = d[key] * inv_scale
+                            if 'lb-rb-rt-lt' in d:
+                                d['lb-rb-rt-lt'] = d['lb-rb-rt-lt'] * inv_scale
+                        detections = dets
+                        break  # Stop at first successful scale
 
         detected_vis = rectified.copy()
 

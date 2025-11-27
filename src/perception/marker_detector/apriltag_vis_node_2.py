@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""
-AprilTag Detection Visualization Node (manual rectification using given K/D/P)
-"""
 
-import time
+import copy
+from typing import Dict
+
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rclpy.time import Time
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Pose
 from cv_bridge import CvBridge
@@ -13,17 +14,14 @@ import cv2
 import numpy as np
 import os
 from datetime import datetime
-import yaml
 
 # your rover's apriltag library
 from apriltag import apriltag
 from perception_msgs.msg import MarkerPoseArray, MarkerPose
+from rcl_interfaces.msg import SetParametersResult
 
 
 def rotation_matrix_to_quaternion(R: np.ndarray):
-    """
-    Convert a 3x3 rotation matrix to quaternion (x, y, z, w).
-    """
     q = np.zeros(4, dtype=np.float64)
     trace = np.trace(R)
 
@@ -60,14 +58,11 @@ def rotation_matrix_to_quaternion(R: np.ndarray):
 class AprilTagVisualizationNode(Node):
     def __init__(self,
                  output_dir: str = 'apriltag_screenshots',
-                 no_gui: bool = True,
-                 tag_family: str = 'tagStandard41h12',
-                 calibration_file: str = None):
+                 tag_family: str = 'tagStandard41h12'):
 
         super().__init__('apriltag_visualization')
 
         self.bridge = CvBridge()
-        self.no_gui = no_gui
 
         self.screenshot_count = 0
         self.output_dir = output_dir
@@ -77,11 +72,9 @@ class AprilTagVisualizationNode(Node):
         self.current_detected = None
         self.frame_count = 0
         self.first_detection = True
-        self.tag_size = 0.162
+        self.tag_size = 0.162  # 16.2 cm in meters
 
-        # --- Calibration parameters (K, D, P) ---
-
-        # Updated calibration parameters
+        # --- Default calibration parameters (K, D, P) ---
         self.K = np.array([
             [286.9896545092208, 0.0, 311.7114840273407],
             [0.0, 290.8395992360502, 249.9287049631703],
@@ -89,37 +82,42 @@ class AprilTagVisualizationNode(Node):
         ], dtype=np.float64)
 
         self.D = np.array([[
-            -0.17995587161461585, 0.020688274841999105, -
-            0.005297672531455161, 0.003378882156848116, 0.0
+            -0.17995587161461585, 0.020688274841999105,
+            -0.005297672531455161, 0.003378882156848116, 0.0
         ]], dtype=np.float64)
 
-        # Projection matrix from calibration (3x4)
         self.P = np.array([
             [190.74984649646845, 0.0, 318.0141593176815, 0.0],
             [0.0, 247.35103262891005, 248.37293105876694, 0.0],
             [0.0, 0.0, 1.0, 0.0]
         ], dtype=np.float64)
 
-        self.get_logger().info("Updated calibration parameters with new matrices.")
-
-        if calibration_file:
-            self.load_calibration(calibration_file)
-
-        # rectification maps
-        self.map1 = None
-        self.map2 = None
-        self.new_K = None
+        self.get_logger().info("Using hardcoded default calibration parameters.")
 
         # Parameters
         self.declare_parameter('tag_family', tag_family)
         self.declare_parameter('image_topic', '/image_raw')
         self.declare_parameter('output_dir', output_dir)
-        self.declare_parameter('no_gui', no_gui)
-        self.declare_parameter('calibration_file', calibration_file or '')
         self.declare_parameter('use_raw', False)
+
+        # NEW: buffer-related parameters
+        self.declare_parameter('enable_buffer', False)
+        self.declare_parameter('buffer_max_age_sec', 0.3)
+        self.declare_parameter('buffer_distance_alpha', 0.6)
+
+        # NEW: multiscale-related parameters
+        self.declare_parameter('enable_multiscale', False)
+        # Comma-separated list of scales, e.g. "0.7,1.0,1.4"
+        self.declare_parameter('multiscale_scales', '1.0')
+
+        # NEW: visualization-related parameters
+        self.declare_parameter('enable_gui', False)
+        self.declare_parameter('publish_debug_image', False)
+
         use_raw = self.get_parameter('use_raw').value
 
         if use_raw:
+            # Experimental "raw" calibration
             self.K = np.array([
                 [289.11451, 0.0, 347.23664],
                 [0.0, 289.75319, 235.67429],
@@ -136,58 +134,119 @@ class AprilTagVisualizationNode(Node):
                 [0.0, 0.0, 1.0, 0.0]
             ], dtype=np.float64)
 
-            self.get_logger().info("Using image_rect calibration parameters.")
+            self.get_logger().info("Using hardcoded experimental RAW calibration parameters.")
         else:
-            self.get_logger().info("Using our calibration parameters.")
+            self.get_logger().info("Using hardcoded default calibration parameters (non-RAW).")
 
         self.tag_family = self.get_parameter('tag_family').value
         image_topic = self.get_parameter('image_topic').value
-        self.no_gui = self.get_parameter('no_gui').value
-        calib_param = self.get_parameter('calibration_file').value
 
-        if calib_param and not calibration_file:
-            self.load_calibration(calib_param)
+        # new_K used for PnP
+        self.new_K = None
 
         # AprilTag detector
+        # For rectified images with small distant markers, use high sensitivity settings:
+        # - decimate=0.25: Very sensitive (detects smaller tags at greater distances)
+        # - blur=0.5: Moderate blur to reduce noise while preserving edges
+        # - refine_edges=True: Improve corner localization accuracy for pose estimation
         self.detector = apriltag(
             self.tag_family,
             threads=4,
             maxhamming=2,
-            decimate=0.25,
+            decimate=0.25,  # High sensitivity for small distant markers
             blur=0.5,
             refine_edges=True,
             debug=False
         )
         self.get_logger().info(
-            f"AprilTag detector initialized: {self.tag_family}")
+            f"AprilTag detector initialized: {self.tag_family}"
+        )
+        self.get_logger().info(
+            f"Detector params: decimate=0.25 (high sensitivity), blur=0.5, refine_edges=True"
+        )
+        self.get_logger().info(
+            "Image preprocessing: CLAHE (clipLimit=3.0) + Subtle Unsharp Mask"
+        )
+        self.get_logger().info(
+            "Extended range strategy: Aggressive multiscale fallback (0.7x, 0.5x scales)"
+        )
 
-        # Single subscription: raw image only
+        # Subscription: processed image
         self.sub = self.create_subscription(
             Image,
-            '/processed_image',
+            '/processed_image',   # or image_topic if you want
             self.image_callback,
             10
         )
 
+        # Publisher for marker poses
         self.pub = self.create_publisher(
-            MarkerPoseArray, '/detected_markers', 10)
+            MarkerPoseArray, '/detected_markers', 10
+        )
 
-        self.display_rectified_image = None
+        # --- NEW: internal state for buffering ---
+        self.enable_buffer = self.get_parameter('enable_buffer').value
+        self.buffer_max_age_sec = self.get_parameter('buffer_max_age_sec').value
+        self.buffer_distance_alpha = self.get_parameter('buffer_distance_alpha').value
 
-        if self.no_gui:
-            cv2.namedWindow("1. Original Image", cv2.WINDOW_NORMAL)
-            cv2.namedWindow(
-                "2. Detected AprilTags (Postprocessed)", cv2.WINDOW_NORMAL)
-            cv2.resizeWindow("1. Original Image", 640, 480)
-            cv2.resizeWindow("2. Detected AprilTags (Postprocessed)", 640, 480)
+        # --- NEW: multiscale config ---
+        self.enable_multiscale = self.get_parameter('enable_multiscale').value
+        multiscale_str = self.get_parameter('multiscale_scales').value
+        self.multiscale_scales = self._parse_multiscale_scales(multiscale_str)
 
-        # add buffer
-        self.marker_buffer = {}
+        # --- NEW: visualization flags ---
+        self.enable_gui = self.get_parameter('enable_gui').value
+        self.publish_debug_image = self.get_parameter('publish_debug_image').value
+
+        # Optional debug image publisher
+        self.debug_pub = None
+        if self.publish_debug_image:
+            self.debug_pub = self.create_publisher(
+                Image,
+                '/apriltag/detected_image',
+                10
+            )
+
+        # Setup GUI windows if requested
+        if self.enable_gui:
+            cv2.namedWindow("AprilTag Original", cv2.WINDOW_NORMAL)
+            cv2.namedWindow("AprilTag Detected", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("AprilTag Original", 640, 480)
+            cv2.resizeWindow("AprilTag Detected", 640, 480)
+
+        # id -> {"marker": MarkerPose, "last_seen": Time}
+        self.marker_state: Dict[int, Dict[str, object]] = {}
+
+        if self.enable_buffer:
+            self.get_logger().info(
+                f"Marker buffering ENABLED: max_age_sec={self.buffer_max_age_sec:.2f}, "
+                f"distance_alpha={self.buffer_distance_alpha:.2f}"
+            )
+        else:
+            self.get_logger().info("Marker buffering DISABLED (publishing raw detections).")
+
+        if self.enable_multiscale:
+            self.get_logger().info(
+                f"Multiscale detection ENABLED. Scales={self.multiscale_scales}"
+            )
+        else:
+            self.get_logger().info("Multiscale detection DISABLED (using single scale).")
+
+        if self.enable_gui:
+            self.get_logger().info("OpenCV GUI visualization ENABLED.")
+        else:
+            self.get_logger().info("OpenCV GUI visualization DISABLED.")
+
+        if self.publish_debug_image:
+            self.get_logger().info("Debug detected image topic PUBLISHED on /apriltag/detected_image.")
+        else:
+            self.get_logger().info("Debug detected image topic DISABLED.")
 
     # ------------------------------------------------------------------ #
     # Utilities
     # ------------------------------------------------------------------ #
     def save_screenshots(self):
+        """Available if you ever want to dump frames to disk."""
         if self.current_original is None or self.current_detected is None:
             self.get_logger().warn("No frames yet to save!")
             return
@@ -196,14 +255,195 @@ class AprilTagVisualizationNode(Node):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         f1 = os.path.join(
-            self.output_dir, f"shot_{self.screenshot_count:03d}_{ts}_orig.png")
+            self.output_dir, f"shot_{self.screenshot_count:03d}_{ts}_orig.png"
+        )
         f2 = os.path.join(
-            self.output_dir, f"shot_{self.screenshot_count:03d}_{ts}_det.png")
+            self.output_dir, f"shot_{self.screenshot_count:03d}_{ts}_det.png"
+        )
 
         cv2.imwrite(f1, self.current_original)
         cv2.imwrite(f2, self.current_detected)
 
         self.get_logger().info(f"Saved screenshots:\n  {f1}\n  {f2}")
+
+    def _parse_multiscale_scales(self, s: str):
+        """
+        Parse a comma-separated list of scales into a list of floats.
+
+        Example:
+            "0.7,1.0,1.4" -> [0.7, 1.0, 1.4]
+
+        Guarantees at least [1.0] if parsing fails.
+        """
+        try:
+            parts = [p.strip() for p in s.split(',') if p.strip()]
+            scales = [float(p) for p in parts]
+            if not scales:
+                return [1.0]
+            # Remove any non-positive or absurd scales
+            scales = [sc for sc in scales if sc > 0.05]
+            return scales or [1.0]
+        except Exception as e:
+            self.get_logger().warn(f"Failed to parse multiscale_scales '{s}': {e}")
+            return [1.0]
+
+    def _apply_visualization_settings(self):
+        """
+        Create/destroy OpenCV windows and debug publisher according to
+        the current parameters. Safe to call multiple times.
+        """
+        # Read current parameter values (use get_parameter to reflect runtime changes)
+        try:
+            enable_gui = self.get_parameter('enable_gui').value
+        except Exception:
+            enable_gui = bool(getattr(self, 'enable_gui', False))
+
+        try:
+            publish_debug = self.get_parameter('publish_debug_image').value
+        except Exception:
+            publish_debug = bool(getattr(self, 'publish_debug_image', False))
+
+        # Handle debug image publisher
+        if publish_debug and self.debug_pub is None:
+            self.debug_pub = self.create_publisher(Image, '/apriltag/detected_image', 10)
+            self.get_logger().info("Debug detected image topic PUBLISHED on /apriltag/detected_image.")
+        elif not publish_debug and self.debug_pub is not None:
+            try:
+                self.destroy_publisher(self.debug_pub)
+            except Exception:
+                pass
+            self.debug_pub = None
+            self.get_logger().info("Debug detected image topic DISABLED.")
+
+        # Handle GUI windows
+        gui_setup = getattr(self, '_gui_setup', False)
+        if enable_gui and not gui_setup:
+            try:
+                cv2.namedWindow("AprilTag Original", cv2.WINDOW_NORMAL)
+                cv2.namedWindow("AprilTag Detected", cv2.WINDOW_NORMAL)
+                cv2.resizeWindow("AprilTag Original", 640, 480)
+                cv2.resizeWindow("AprilTag Detected", 640, 480)
+                self._gui_setup = True
+                self.get_logger().info("OpenCV GUI visualization ENABLED.")
+            except cv2.error as e:
+                self.get_logger().warn(f"OpenCV GUI error when enabling windows: {e}")
+                self._gui_setup = False
+        elif not enable_gui and gui_setup:
+            try:
+                cv2.destroyWindow("AprilTag Original")
+                cv2.destroyWindow("AprilTag Detected")
+            except cv2.error:
+                try:
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+            self._gui_setup = False
+            self.get_logger().info("OpenCV GUI visualization DISABLED.")
+
+        # Update cached flags
+        self.enable_gui = enable_gui
+        self.publish_debug_image = publish_debug
+
+    def _on_set_parameters(self, params):
+        """rclpy parameter callback to react to runtime parameter changes."""
+        changed = False
+        for p in params:
+            if p.name == 'enable_gui':
+                changed = True
+            elif p.name == 'publish_debug_image':
+                changed = True
+            elif p.name == 'multiscale_scales':
+                # reparse scales if changed
+                try:
+                    self.multiscale_scales = self._parse_multiscale_scales(p.value)
+                except Exception:
+                    pass
+                changed = True
+            elif p.name == 'enable_multiscale':
+                try:
+                    self.enable_multiscale = bool(p.value)
+                except Exception:
+                    pass
+                changed = True
+
+        if changed:
+            # Apply visualization state changes (create/destroy windows/publishers)
+            try:
+                self._apply_visualization_settings()
+            except Exception as e:
+                self.get_logger().warn(f"Error applying visualization settings: {e}")
+
+        # Always return successful so parameter setting isn't blocked
+        result = SetParametersResult()
+        result.successful = True
+        result.reason = ''
+        return result
+
+    def _detect_multiscale(self, gray):
+        """
+        Run AprilTag detection on multiple image scales and merge results.
+
+        For each scale:
+          - resize the gray image
+          - run detector
+          - rescale all corner / center coordinates back to original image coordinates
+        Then:
+          - deduplicate by tag id, keeping the detection with largest image area.
+        """
+        h, w = gray.shape[:2]
+        all_dets = []
+
+        for scale in self.multiscale_scales:
+            # Avoid ridiculous sizes
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            if new_w < 32 or new_h < 32:
+                continue
+
+            if abs(scale - 1.0) < 1e-3:
+                img_scaled = gray
+            else:
+                img_scaled = cv2.resize(
+                    gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR
+                )
+
+            dets = self.detector.detect(img_scaled)
+            for d in dets:
+                # Shallow copy so we don't mutate original dict from detector
+                d2 = dict(d)
+
+                # Rescale all pixel coordinates back to original image space
+                for key in ['lb', 'rb', 'rt', 'lt', 'center']:
+                    if key in d2:
+                        d2[key] = d2[key] / scale
+
+                if 'lb-rb-rt-lt' in d2:
+                    d2['lb-rb-rt-lt'] = d2['lb-rb-rt-lt'] / scale
+
+                d2['_scale'] = scale  # optional debug info
+                all_dets.append(d2)
+
+        if not all_dets:
+            return []
+
+        # Deduplicate by tag id: keep the one with largest apparent area
+        dedup = {}
+        for d in all_dets:
+            tag_id = d['id']
+
+            # Estimate area from corners
+            if 'lb-rb-rt-lt' in d:
+                corners = d['lb-rb-rt-lt']
+            else:
+                corners = np.array([d['lb'], d['rb'], d['rt'], d['lt']])
+            xs = corners[:, 0]
+            ys = corners[:, 1]
+            area = float((xs.max() - xs.min()) * (ys.max() - ys.min()))
+
+            if tag_id not in dedup or area > dedup[tag_id]['area']:
+                dedup[tag_id] = {'det': d, 'area': area}
+
+        return [v['det'] for v in dedup.values()]
 
     # ------------------------------------------------------------------ #
     # Main callback
@@ -211,26 +451,59 @@ class AprilTagVisualizationNode(Node):
     def image_callback(self, msg: Image):
         self.frame_count += 1
 
-        # Convert raw image
+        # Convert incoming image
         rectified = self.bridge.imgmsg_to_cv2(msg)
         self.current_original = rectified.copy()
 
         if self.new_K is None and self.P is not None:
             self.new_K = self.P[:, :3]
 
-        # This is the image we run AprilTag on
+        # Gray for detection
         gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
 
-        # Optional preprocessing
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        # Preprocessing to enhance small markers at distance (especially after rectification)
+        # Step 1: CLAHE for adaptive local contrast enhancement
+        # Higher clipLimit increases sensitivity to distant small markers
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         gray = clahe.apply(gray)
 
-        # kernel = np.array([[-1, -1, -1],
-        #                    [-1,  9, -1],
-        #                    [-1, -1, -1]], dtype=np.float32)
-        # postprocessed = cv2.filter2D(gray, -1, kernel)
+        # Step 2: Subtle unsharp mask to sharpen marker edges without over-processing
+        # This helps AprilTag edge detection without artifacts
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        gray = cv2.addWeighted(gray, 1.2, blurred, -0.2, 0)
+        gray = np.clip(gray, 0, 255).astype(np.uint8)
 
-        detections = self.detector.detect(gray)
+        # --- Detection: single scale or multiscale ---
+        # For extended range on rectified images, use intelligent fallback strategy
+        if self.enable_multiscale:
+            detections = self._detect_multiscale(gray)
+        else:
+            # Single scale detection first
+            detections = self.detector.detect(gray)
+            
+            # Aggressive fallback: if nothing detected, try multiple downsampled scales
+            # This is very effective for catching distant small markers
+            if len(detections) == 0 and gray.shape[0] > 64 and gray.shape[1] > 64:
+                # Try progressively smaller scales: 0.7x, 0.5x
+                for scale_factor in [0.7, 0.5]:
+                    gray_scaled = cv2.resize(
+                        gray, None, fx=scale_factor, fy=scale_factor, 
+                        interpolation=cv2.INTER_LINEAR
+                    )
+                    dets = self.detector.detect(gray_scaled)
+                    
+                    if dets:
+                        # Rescale back to original coordinates
+                        inv_scale = 1.0 / scale_factor
+                        for d in dets:
+                            for key in ['lb', 'rb', 'rt', 'lt', 'center']:
+                                if key in d:
+                                    d[key] = d[key] * inv_scale
+                            if 'lb-rb-rt-lt' in d:
+                                d['lb-rb-rt-lt'] = d['lb-rb-rt-lt'] * inv_scale
+                        detections = dets
+                        break  # Stop at first successful scale
+
         detected_vis = rectified.copy()
 
         marker_array_msg = MarkerPoseArray()
@@ -257,10 +530,11 @@ class AprilTagVisualizationNode(Node):
                     lt = tuple(corners[3].astype(int))
                 else:
                     self.get_logger().error(
-                        f"Unknown corner format. Keys: {d.keys()}")
+                        f"Unknown corner format. Keys: {d.keys()}"
+                    )
                     continue
 
-                # Draw box
+                # Draw box (only affects detected_vis, for screenshots / debug)
                 cv2.line(detected_vis, lt, rt, (0, 255, 0), 2)
                 cv2.line(detected_vis, rt, rb, (0, 255, 0), 2)
                 cv2.line(detected_vis, rb, lb, (0, 255, 0), 2)
@@ -286,35 +560,22 @@ class AprilTagVisualizationNode(Node):
                 distance_value = -1.0
 
                 try:
-                    # Build image corner array in correct order:
-                    # AprilTag standard order:  lt, rt, rb, lb
+                    # Image points: lt, rt, rb, lb
                     img_pts = np.array([lt, rt, rb, lb], dtype=np.float32)
 
                     # Camera intrinsics
-                    # fx = self.K[0, 0]
-                    # fy = self.K[1, 1]
-                    # cx = self.K[0, 2]
-                    # cy = self.K[1, 2]
-                    fx = self.new_K[0, 0]
-                    fy = self.new_K[1, 1]
-                    cx = self.new_K[0, 2]
-                    cy = self.new_K[1, 2]
-
                     camera_matrix = self.new_K
                     dist_coeffs = np.zeros((4, 1), dtype=np.float32)
-                    # camera_matrix = self.K
-                    # dist_coeffs = self.D
 
-                    # 3D tag model (square, lying flat on z=0)
+                    # 3D tag model
                     s = self.tag_size / 2.0
                     obj_pts = np.array([
                         [-s,  s, 0],
-                        [s,  s, 0],
-                        [s, -s, 0],
+                        [ s,  s, 0],
+                        [ s, -s, 0],
                         [-s, -s, 0]
                     ], dtype=np.float32)
 
-                    # Solve for pose
                     success, rvec, tvec = cv2.solvePnP(
                         obj_pts, img_pts, camera_matrix, dist_coeffs
                     )
@@ -322,7 +583,6 @@ class AprilTagVisualizationNode(Node):
                     if not success:
                         raise RuntimeError("solvePnP returned False")
 
-                    # Convert rotation vector -> matrix
                     R, _ = cv2.Rodrigues(rvec)
                     t = tvec.flatten()
 
@@ -339,7 +599,7 @@ class AprilTagVisualizationNode(Node):
                     pose_msg.orientation.z = qz
                     pose_msg.orientation.w = qw
 
-                    # Display depth + distance
+                    # Optional text overlay in detected_vis only
                     cv2.putText(
                         detected_vis,
                         f"Z={t[2]:.2f}m Dist={distance:.2f}m",
@@ -377,21 +637,81 @@ class AprilTagVisualizationNode(Node):
 
             marker_array_msg.markers.append(marker_msg)
 
-        # Update the detected AprilTags window to show the rectified image with detections
+        # Store last annotated image
         self.current_detected = detected_vis.copy()
 
-        if self.no_gui:
-            cv2.imshow("1. Original Image", self.current_original)
-            cv2.imshow("2. Detected AprilTags (Postprocessed)",
-                       self.current_detected)
+        # --- NEW: visualization (OpenCV windows) ---
+        if self.enable_gui:
+            try:
+                cv2.imshow("AprilTag Original", self.current_original)
+                cv2.imshow("AprilTag Detected", self.current_detected)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('s'):
+                    self.save_screenshots()
+                # if key == ord('q'):
+                #     rclpy.shutdown()  # optional, usually just Ctrl+C
+            except cv2.error as e:
+                self.get_logger().warn(f"OpenCV GUI error: {e}")
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('s'):
-                self.save_screenshots()
-            if key == ord('q'):
-                raise KeyboardInterrupt
+        # --- NEW: publish debug image if requested ---
+        if self.publish_debug_image and self.debug_pub is not None:
+            dbg_msg = self.bridge.cv2_to_imgmsg(self.current_detected, encoding='bgr8')
+            dbg_msg.header = msg.header
+            self.debug_pub.publish(dbg_msg)
 
-        self.pub.publish(marker_array_msg)
+        # ----------- inline buffering logic -----------
+        if not self.enable_buffer:
+            # Old behaviour: publish raw detections
+            self.pub.publish(marker_array_msg)
+            return
+
+        # With buffering enabled, update internal state and publish "stable" markers
+        try:
+            now = Time.from_msg(marker_array_msg.header.stamp)
+        except Exception:
+            # Fallback to node clock if header.stamp is empty
+            now = self.get_clock().now()
+
+        # 1. Update markers we actually see in this frame
+        for m in marker_array_msg.markers:
+            if m.id in self.marker_state:
+                prev_marker: MarkerPose = self.marker_state[m.id]["marker"]
+                # low-pass filter on distance
+                filtered_distance = (
+                    self.buffer_distance_alpha * m.distance
+                    + (1.0 - self.buffer_distance_alpha) * prev_marker.distance
+                )
+                new_marker = copy.deepcopy(m)
+                new_marker.distance = float(filtered_distance)
+                # we keep the current pose; only distance is smoothed
+            else:
+                # First time we see this marker
+                new_marker = copy.deepcopy(m)
+
+            self.marker_state[m.id] = {
+                "marker": new_marker,
+                "last_seen": now,
+            }
+
+        # 2. Build output array with all markers that are still "fresh" enough
+        out = MarkerPoseArray()
+        out.header = marker_array_msg.header
+
+        ids_to_delete = []
+        for marker_id, state in self.marker_state.items():
+            age = (now - state["last_seen"]).nanoseconds / 1e9
+
+            if age <= self.buffer_max_age_sec:
+                # Still fresh enough → keep
+                out.markers.append(state["marker"])
+            else:
+                # Too old → forget this marker
+                ids_to_delete.append(marker_id)
+
+        for marker_id in ids_to_delete:
+            del self.marker_state[marker_id]
+
+        self.pub.publish(out)
 
 
 def main(args=None):
@@ -402,30 +722,63 @@ def main(args=None):
     parser.add_argument("--tag_family", type=str, default="tagStandard41h12")
     parser.add_argument("--output_dir", type=str,
                         default="apriltag_screenshots")
-    parser.add_argument("--no_gui", action="store_false")
-    parser.add_argument(
-        "--calibration",
-        type=str,
-        default=None,
-        help="Path to calibration YAML (optional)"
-    )
     parser.add_argument(
         "--use_raw",
         action="store_true",
-        help="Use experimental calibration parameters instead of the default ones."
+        help="Use experimental hardcoded RAW calibration instead of the default one."
     )
+    # NEW: CLI flag to enable buffer easily
+    parser.add_argument(
+        "--enable_buffer",
+        action="store_true",
+        help="Enable temporal buffering of detected markers."
+    )
+    parser.add_argument(
+        "--enable_multiscale",
+        action="store_true",
+        help="Enable multiscale AprilTag detection."
+    )
+    parser.add_argument(
+        "--multiscale_scales",
+        type=str,
+        default="1.0",
+        help="Comma-separated list of scales, e.g. '0.7,1.0,1.4'."
+    )
+    # NEW: visualization flags
+    parser.add_argument(
+        "--enable_gui",
+        action="store_true",
+        help="Show OpenCV windows (requires X/xlaunch)."
+    )
+    parser.add_argument(
+        "--publish_debug_image",
+        action="store_true",
+        help="Publish annotated detected image on /apriltag/detected_image."
+    )
+
     parsed, _ = parser.parse_known_args()
 
     node = AprilTagVisualizationNode(
         output_dir=parsed.output_dir,
-        no_gui=parsed.no_gui,
         tag_family=parsed.tag_family,
-        calibration_file=parsed.calibration
     )
 
+    params = []
     if parsed.use_raw:
-        node.set_parameters([rclpy.parameter.Parameter(
-            'use_raw', rclpy.Parameter.Type.BOOL, True)])
+        params.append(Parameter('use_raw', Parameter.Type.BOOL, True))
+    if parsed.enable_buffer:
+        params.append(Parameter('enable_buffer', Parameter.Type.BOOL, True))
+    if parsed.enable_multiscale:
+        params.append(Parameter('enable_multiscale', Parameter.Type.BOOL, True))
+    # Always push the string, so it matches the param declaration
+    params.append(Parameter('multiscale_scales', Parameter.Type.STRING, parsed.multiscale_scales))
+    if parsed.enable_gui:
+        params.append(Parameter('enable_gui', Parameter.Type.BOOL, True))
+    if parsed.publish_debug_image:
+        params.append(Parameter('publish_debug_image', Parameter.Type.BOOL, True))
+
+    if params:
+        node.set_parameters(params)
 
     try:
         rclpy.spin(node)
@@ -434,351 +787,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
-        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
     main()
-
-# !/usr/bin/env python3
-
-# """
-# AprilTag Detection Visualization Node (manual rectification using given K/D/P)
-# """
-
-# import time
-# import rclpy
-# from rclpy.node import Node
-# from sensor_msgs.msg import Image
-# from cv_bridge import CvBridge
-# import cv2
-# import numpy as np
-# import os
-# from datetime import datetime
-# import yaml
-
-# # your rover's apriltag library
-# from apriltag import apriltag
-
-
-# class AprilTagVisualizationNode(Node):
-#     def __init__(self,
-#                  output_dir: str = 'apriltag_screenshots',
-#                  no_gui: bool = False,
-#                  tag_family: str = 'tagStandard41h12',
-#                  calibration_file: str = None):
-
-#         super().__init__('apriltag_visualization')
-
-#         self.bridge = CvBridge()
-#         self.no_gui = no_gui
-
-#         self.screenshot_count = 0
-#         self.output_dir = output_dir
-#         os.makedirs(self.output_dir, exist_ok=True)
-
-#         self.current_original = None
-#         self.current_detected = None
-#         self.frame_count = 0
-#         self.first_detection = True
-
-#         # --- Calibration parameters (K, D, P) ---
-
-#         # Updated calibration parameters
-#         self.K = np.array([
-#             [286.9896545092208, 0.0, 311.7114840273407],
-#             [0.0, 290.8395992360502, 249.9287049631703],
-#             [0.0, 0.0, 1.0]
-#         ], dtype=np.float64)
-
-#         self.D = np.array([[
-#             -0.17995587161461585, 0.020688274841999105, -0.005297672531455161, 0.003378882156848116, 0.0
-#         ]], dtype=np.float64)
-
-#         # Projection matrix from calibration (3x4)
-#         self.P = np.array([
-#             [190.74984649646845, 0.0, 318.0141593176815, 0.0],
-#             [0.0, 247.35103262891005, 248.37293105876694, 0.0],
-#             [0.0, 0.0, 1.0, 0.0]
-#         ], dtype=np.float64)
-
-#         self.get_logger().info("Updated calibration parameters with new matrices.")
-
-#         if calibration_file:
-#             self.load_calibration(calibration_file)
-
-#         # rectification maps
-#         self.map1 = None
-#         self.map2 = None
-#         self.new_K = None
-
-#         # Tag size and camera params for distance measurement
-#         self.tag_size = 0.162  # 16.2 cm in meters
-
-#         # Extract camera params from K matrix for apriltag
-#         self.camera_params = [
-#             self.K[0, 0],  # fx = 286.99
-#             self.K[1, 1],  # fy = 290.84
-#             self.K[0, 2],  # cx = 311.71
-#             self.K[1, 2]   # cy = 249.93
-#         ]
-
-#         # Parameters
-#         self.declare_parameter('tag_family', tag_family)
-#         self.declare_parameter('image_topic', '/image_raw')
-#         self.declare_parameter('output_dir', output_dir)
-#         self.declare_parameter('no_gui', no_gui)
-#         self.declare_parameter('calibration_file', calibration_file or '')
-
-#         self.tag_family = self.get_parameter('tag_family').value
-#         image_topic = self.get_parameter('image_topic').value
-#         self.no_gui = self.get_parameter('no_gui').value
-#         calib_param = self.get_parameter('calibration_file').value
-
-#         if calib_param and not calibration_file:
-#             self.load_calibration(calib_param)
-
-#         # AprilTag detector
-#         self.detector = apriltag(
-#             self.tag_family,
-#             threads=4,
-#             maxhamming=2,
-#             decimate=0.25,
-#             blur=0.8,
-#             refine_edges=True,
-#             debug=False
-#         )
-#         self.get_logger().info(f"AprilTag detector initialized: {self.tag_family}")
-
-#         # Single subscription: raw image only
-#         self.sub = self.create_subscription(
-#             Image, image_topic, self.image_callback, 10
-#         )
-
-#         self.display_rectified_image = None
-
-#         if not self.no_gui:
-#             cv2.namedWindow("1. Original Image", cv2.WINDOW_NORMAL)
-#             cv2.namedWindow("2. Detected AprilTags (Postprocessed)", cv2.WINDOW_NORMAL)
-#             cv2.resizeWindow("1. Original Image", 640, 480)
-#             cv2.resizeWindow("2. Detected AprilTags (Postprocessed)", 640, 480)
-
-#     # ------------------------------------------------------------------ #
-#     # Calibration loader
-#     # ------------------------------------------------------------------ #
-#     def load_calibration(self, yaml_file: str):
-#         """
-#         Load calibration from YAML.
-#         Supports:
-#           - nav2 / camera_calibration style:
-#               camera_matrix: {data: [...]}
-#               distortion_coefficients: {data: [...]}
-#               projection_matrix: {data: [...]}
-#           - oST style:
-#               K: [...]
-#               D: [...]
-#               P: [...]
-#         """
-#         try:
-#             with open(yaml_file, 'r') as f:
-#                 data = yaml.safe_load(f)
-
-#             K = None
-#             D = None
-#             P = None
-
-#             if 'camera_matrix' in data:
-#                 K = np.array(data['camera_matrix']['data'],
-#                              dtype=np.float64).reshape(3, 3)
-#                 D = np.array(data['distortion_coefficients']['data'],
-#                              dtype=np.float64).reshape(1, -1)
-#                 if 'projection_matrix' in data:
-#                     P = np.array(data['projection_matrix']['data'],
-#                                  dtype=np.float64).reshape(3, 4)
-#             elif 'K' in data:
-#                 K = np.array(data['K'], dtype=np.float64).reshape(3, 3)
-#                 D = np.array(data['D'], dtype=np.float64).reshape(1, -1)
-#                 if 'P' in data:
-#                     P = np.array(data['P'], dtype=np.float64).reshape(3, 4)
-
-#             if K is not None:
-#                 self.K = K
-#             if D is not None:
-#                 self.D = D
-#             if P is not None:
-#                 self.P = P
-
-#             self.get_logger().info(f"Loaded calibration from {yaml_file}")
-#             self.get_logger().info(f"K:\n{self.K}")
-#             self.get_logger().info(f"D: {self.D}")
-#             if self.P is not None:
-#                 self.get_logger().info(f"P:\n{self.P}")
-#         except Exception as e:
-#             self.get_logger().error(f"Failed to load calibration from {yaml_file}: {e}")
-
-#     # ------------------------------------------------------------------ #
-#     # Utilities
-#     # ------------------------------------------------------------------ #
-#     def save_screenshots(self):
-#         if self.current_original is None or self.current_detected is None:
-#             self.get_logger().warn("No frames yet to save!")
-#             return
-
-#         self.screenshot_count += 1
-#         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-#         f1 = os.path.join(self.output_dir, f"shot_{self.screenshot_count:03d}_{ts}_orig.png")
-#         f2 = os.path.join(self.output_dir, f"shot_{self.screenshot_count:03d}_{ts}_det.png")
-
-#         cv2.imwrite(f1, self.current_original)
-#         cv2.imwrite(f2, self.current_detected)
-
-#         self.get_logger().info(f"Saved screenshots:\n  {f1}\n  {f2}")
-
-#     # ------------------------------------------------------------------ #
-#     # Main callback
-#     # ------------------------------------------------------------------ #
-#     def image_callback(self, msg: Image):
-#         self.frame_count += 1
-
-#         # Convert raw image
-#         raw = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-#         self.current_original = raw.copy()
-
-#         h, w = raw.shape[:2]
-
-#         # Init rectification maps once
-#         if self.map1 is None or self.map2 is None:
-#             if self.P is not None:
-#                 # Use projection matrix from calibration as new K
-#                 self.new_K = self.P[:, :3]
-#                 self.get_logger().info("Using P[:,:3] as new camera matrix for rectification.")
-#             else:
-#                 # Fallback: compute new_K with alpha=0 (crop to valid region)
-#                 self.new_K, _ = cv2.getOptimalNewCameraMatrix(
-#                     self.K, self.D, (w, h), 0.0, (w, h)
-#                 )
-#                 self.get_logger().warn("No P found in calibration, using getOptimalNewCameraMatrix(alpha=0).")
-
-#             self.map1, self.map2 = cv2.initUndistortRectifyMap(
-#                 self.K, self.D, None, self.new_K, (w, h), cv2.CV_32FC1
-#             )
-#             self.get_logger().info("Initialized undistortion maps.")
-
-#         # Rectify using our K/D/P
-#         rectified = cv2.remap(raw, self.map1, self.map2, cv2.INTER_LINEAR)
-
-#         # This is the image we run AprilTag on
-#         gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
-
-#         # Optional preprocessing
-#         # clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-#         # gray = clahe.apply(gray)
-
-#         # kernel = np.array([[-1, -1, -1],
-#         #                    [-1,  9, -1],
-#         #                    [-1, -1, -1]], dtype=np.float32)
-#         # postprocessed = cv2.filter2D(gray, -1, kernel)
-
-#         detections = self.detector.detect(gray)
-#         detected_vis = rectified.copy()
-
-#         for d in detections:
-#             if self.first_detection:
-#                 self.get_logger().info(f"Detection keys: {d.keys()}")
-#                 self.get_logger().info(f"Detection structure: {d}")
-#                 self.first_detection = False
-
-#             try:
-#                 # Extract corners
-#                 if 'lb' in d:
-#                     lb = tuple(d['lb'].astype(int))
-#                     rb = tuple(d['rb'].astype(int))
-#                     rt = tuple(d['rt'].astype(int))
-#                     lt = tuple(d['lt'].astype(int))
-#                 elif 'lb-rb-rt-lt' in d:
-#                     corners = d['lb-rb-rt-lt']
-#                     lb = tuple(corners[0].astype(int))
-#                     rb = tuple(corners[1].astype(int))
-#                     rt = tuple(corners[2].astype(int))
-#                     lt = tuple(corners[3].astype(int))
-#                 else:
-#                     self.get_logger().error(f"Unknown corner format. Keys: {d.keys()}")
-#                     continue
-
-#                 # Calculate pose and distance
-#                 pose, e0, e1 = self.detector.detection_pose(d, self.camera_params, self.tag_size)
-#                 distance = np.linalg.norm(pose[:3, 3])
-
-#                 # Draw box
-#                 cv2.line(detected_vis, lt, rt, (0, 255, 0), 2)
-#                 cv2.line(detected_vis, rt, rb, (0, 255, 0), 2)
-#                 cv2.line(detected_vis, rb, lb, (0, 255, 0), 2)
-#                 cv2.line(detected_vis, lb, lt, (0, 255, 0), 2)
-
-#                 # Center
-#                 center = tuple(d['center'].astype(int))
-#                 cv2.circle(detected_vis, center, 5, (0, 0, 255), -1)
-
-#                 # Label with distance
-#                 tag_id = d['id']
-#                 cv2.putText(
-#                     detected_vis,
-#                     f"{self.tag_family} id={tag_id} dist={distance:.2f}m",
-#                     (lt[0], lt[1] - 10),
-#                     cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-#                     (0, 255, 0), 2
-#                 )
-#             except Exception as e:
-#                 self.get_logger().error(f"Error processing detection: {e}")
-#                 continue
-
-#         # Update the detected AprilTags window to show the rectified image with detections
-#         self.current_detected = detected_vis.copy()
-
-#         if not self.no_gui:
-#             cv2.imshow("1. Original Image", self.current_original)
-#             cv2.imshow("2. Detected AprilTags (Postprocessed)", self.current_detected)
-
-#             key = cv2.waitKey(1) & 0xFF
-#             if key == ord('s'):
-#                 self.save_screenshots()
-#             if key == ord('q'):
-#                 raise KeyboardInterrupt
-
-
-# def main(args=None):
-#     rclpy.init(args=args)
-
-#     import argparse
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument("--tag_family", type=str, default="tagStandard41h12")
-#     parser.add_argument("--output_dir", type=str, default="apriltag_screenshots")
-#     parser.add_argument("--no-gui", action="store_true")
-#     parser.add_argument(
-#         "--calibration",
-#         type=str,
-#         default=None,
-#         help="Path to calibration YAML (optional)"
-#     )
-#     parsed, _ = parser.parse_known_args()
-
-#     node = AprilTagVisualizationNode(
-#         output_dir=parsed.output_dir,
-#         no_gui=parsed.no_gui,
-#         tag_family=parsed.tag_family,
-#         calibration_file=parsed.calibration
-#     )
-
-#     try:
-#         rclpy.spin(node)
-#     except KeyboardInterrupt:
-#         pass
-#     finally:
-#         node.destroy_node()
-#         rclpy.shutdown()
-#         cv2.destroyAllWindows()
-
-
-# if __name__ == "__main__":
-#     main()

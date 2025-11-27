@@ -340,7 +340,10 @@ class FieldVisualizationNode(Node):
 
     def draw_static_markers(self, img):
         """Draw all markers from marker_map (global positions)."""
-        for mid, (mx_m, my_m) in self.marker_map.items():
+        # self.get_logger().info(f"Marker map: {self.marker_map.values()}")
+        for mid, v in self.marker_map.items():
+            # self.get_logger().info(f"Fuck you map: {v}")
+            mx_m, my_m, _ = v
             x_mm = mx_m * 1000.0
             y_mm = my_m * 1000.0
             u, v = self.world_to_pixel(x_mm, y_mm)
@@ -367,7 +370,7 @@ class FieldVisualizationNode(Node):
             if m.id not in self.marker_map:
                 continue
 
-            mx_m, my_m = self.marker_map[m.id]
+            mx_m, my_m, _ = self.marker_map[m.id]
             x_mm = mx_m * 1000.0
             y_mm = my_m * 1000.0
             mu, mv = self.world_to_pixel(x_mm, y_mm)

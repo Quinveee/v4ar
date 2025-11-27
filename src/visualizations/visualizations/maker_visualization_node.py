@@ -19,7 +19,7 @@ class VisualizationNode(Node):
         self.image_sub = self.create_subscription(
             Image, '/processed_image', self.image_callback, 10)
         self.marker_sub = self.create_subscription(
-            MarkerPoseArray, '/detected_markers', self.markers_callback, 10)
+            MarkerPoseArray, '/oak/detected_markers', self.markers_callback, 10)
 
         # Buffers for latest data
         self.latest_image = None
