@@ -6,6 +6,7 @@ import math
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
+from perception_msgs.msg import ObjectPoseArray
 from ament_index_python.packages import get_package_share_directory
 
 import cv2
@@ -112,6 +113,7 @@ class ControlVisualizationNode(Node):
         # Latest pose & trajectory
         self.latest_control_pose: PoseStamped | None = None
         self.trajectory_points = []  # List of (x, y) tuples
+        self.obstacles_world = []  # List of (x, y) tuples for obstacles
 
         # --- Subscriptions ---
         self.control_pose_sub = self.create_subscription(
@@ -119,6 +121,9 @@ class ControlVisualizationNode(Node):
         )
         self.control_trajectory_sub = self.create_subscription(
             PoseStamped, "/control/temp_trajectory", self.trajectory_callback, 10
+        )
+        self.obstacle_sub = self.create_subscription(
+            ObjectPoseArray, "/nav2/obstacles_world", self.obstacle_callback, 10
         )
 
         self.get_logger().info(
@@ -158,6 +163,14 @@ class ControlVisualizationNode(Node):
         # Limit trajectory size
         if len(self.trajectory_points) > 1000:
             self.trajectory_points = self.trajectory_points[-1000:]
+
+    def obstacle_callback(self, msg: ObjectPoseArray):
+        """Callback for obstacle updates in world frame."""
+        self.obstacles_world = []
+        for obj in msg.rovers:
+            x = obj.pose.position.x
+            y = obj.pose.position.y
+            self.obstacles_world.append((x, y))
 
     def world_to_pixel(self, x_world_mm: float, y_world_mm: float):
         """
@@ -275,6 +288,29 @@ class ControlVisualizationNode(Node):
                         2,
                     )
 
+            # Draw obstacles (red squares)
+            for obs_x, obs_y in self.obstacles_world:
+                obs_x_mm = obs_x * 1000.0
+                obs_y_mm = obs_y * 1000.0
+                obs_u, obs_v = self.world_to_pixel(obs_x_mm, obs_y_mm)
+                
+                # Draw square (20x20 pixels)
+                size = 10
+                cv2.rectangle(
+                    field,
+                    (obs_u - size, obs_v - size),
+                    (obs_u + size, obs_v + size),
+                    (0, 0, 255),  # Red
+                    -1  # Filled
+                )
+                cv2.rectangle(
+                    field,
+                    (obs_u - size, obs_v - size),
+                    (obs_u + size, obs_v + size),
+                    (255, 255, 255),  # White outline
+                    2
+                )
+
             # Draw current robot pose (yellow circle with arrow)
             if self.latest_control_pose is not None:
                 x_m = self.latest_control_pose.pose.position.x
@@ -344,6 +380,15 @@ class ControlVisualizationNode(Node):
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 (255, 255, 255),
+                2,
+            )
+            cv2.putText(
+                field,
+                f"Obstacles: {len(self.obstacles_world)}",
+                (20, status_y + 90),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255),
                 2,
             )
 

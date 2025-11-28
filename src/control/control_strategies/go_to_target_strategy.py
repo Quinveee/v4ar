@@ -110,6 +110,8 @@ class GoToTargetStrategy(BaseControlStrategy):
     def update_from_cmd_vel(self, linear_vel: float, angular_vel: float, dt: float):
         """Update position estimate using cmd_vel (dead reckoning).
         
+        Updates current state based on elapsed time and current speed.
+        
         Args:
             linear_vel: Linear velocity (m/s)
             angular_vel: Angular velocity (rad/s)
@@ -121,22 +123,19 @@ class GoToTargetStrategy(BaseControlStrategy):
         if dt <= 0 or dt > 1.0:  # Sanity check
             return
         
-        # Dead reckoning motion model
-        if abs(angular_vel) < 1e-6:
-            # Straight line motion
-            self.current_x += linear_vel * math.cos(self.current_theta) * dt
-            self.current_y += linear_vel * math.sin(self.current_theta) * dt
-        else:
-            # Arc motion
-            radius = linear_vel / angular_vel if abs(angular_vel) > 1e-6 else 0.0
-            dtheta = angular_vel * dt
-            self.current_x += radius * (math.sin(self.current_theta + dtheta) - 
-                                       math.sin(self.current_theta))
-            self.current_y += radius * (-math.cos(self.current_theta + dtheta) + 
-                                       math.cos(self.current_theta))
-            self.current_theta += dtheta
+        # Update orientation based on angular velocity and time
+        dtheta = angular_vel * dt
+        self.current_theta += dtheta
         
-        # Normalize theta
+        # Update position based on linear velocity and time
+        # Distance moved = speed * time
+        distance = linear_vel * dt
+        
+        # Update x and y based on current heading
+        self.current_x += distance * math.cos(self.current_theta)
+        self.current_y += distance * math.sin(self.current_theta)
+        
+        # Normalize theta to [-pi, pi]
         self.current_theta = math.atan2(math.sin(self.current_theta), 
                                         math.cos(self.current_theta))
 

@@ -42,7 +42,8 @@ setup(
             'localization = marker_detector.localization:main',
             'odometry_node = odometry.odometry:main',
             'oak_mono_triangulation = marker_detector.oak_mono_triangulation_node:main',
-            'triangulation_uni = marker_detector.triangulation_uni:main'
+            'triangulation_uni = marker_detector.triangulation_uni:main',
+            'rover_detector_with_pose = obstacle_detector.detector:main',
         ],
     },
 )

@@ -41,6 +41,8 @@ setup(
             'dwa_strategy = curling_control.navigation_strategies.dwa_strategy:main',
             'potential_field_strategy = curling_control.navigation_strategies.potential_field_strategy:main',
             'direct_goal_strategy = curling_control.navigation_strategies.direct_goal_strategy:main',
+            'nav2_strategy = curling_control.navigation_strategies.nav2_strategy:main',
+            'dead_reckoning_odom = curling_control.navigation_strategies.dead_reckoning_odom:main',
             'control_node = control_node.control_node:main',
         ],
     },

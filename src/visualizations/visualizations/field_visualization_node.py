@@ -163,6 +163,11 @@ class FieldVisualizationNode(Node):
         # marker config (same default as triangulation_node)
         self.declare_parameter("marker_config", "config/markers.yaml")
 
+        # NEW: viewpoint visualization flags (all default -> no behavior change)
+        self.declare_parameter("show_viewpoints", False)
+        self.declare_parameter("viewpoint_side", "both")          # 'left'/'right'/'both'
+        self.declare_parameter("viewpoint_half_offset_m", 1.0)    # before/after half-line
+
         field_image_path = self.get_parameter("field_image").value
         self.draw_field_flag = bool(self.get_parameter("draw_field").value)
         self.scale_px_per_mm = float(
@@ -176,6 +181,19 @@ class FieldVisualizationNode(Node):
             self.get_parameter("use_buffered_markers").value)
         self.marker_topic_param = str(self.get_parameter("marker_topic").value)
         self.pose_topic = str(self.get_parameter("pose_topic").value)
+
+        # NEW: viewpoint params -> attributes
+        self.show_viewpoints = bool(
+            self.get_parameter("show_viewpoints").value
+        )
+        self.viewpoint_side = str(
+            self.get_parameter("viewpoint_side").value
+        ).lower()
+        if self.viewpoint_side not in ("left", "right", "both"):
+            self.viewpoint_side = "both"
+        self.viewpoint_half_offset_m = float(
+            self.get_parameter("viewpoint_half_offset_m").value
+        )
 
         # --- Load marker_map from YAML (in meters) ---
         config_path = self.get_parameter("marker_config").value
@@ -346,26 +364,103 @@ class FieldVisualizationNode(Node):
 
     def draw_static_markers(self, img):
         """Draw all markers from marker_map (global positions)."""
-        # self.get_logger().info(f"Marker map: {self.marker_map.values()}")
         for mid, v in self.marker_map.items():
-            # self.get_logger().info(f"Fuck you map: {v}")
             mx_m, my_m, _ = v
             x_mm = mx_m * 1000.0
             y_mm = my_m * 1000.0
-            u, v = self.world_to_pixel(x_mm, y_mm)
+            u, v_px = self.world_to_pixel(x_mm, y_mm)
 
             # marker dot
-            cv2.circle(img, (u, v), 6, (255, 0, 0), -1)  # blue dot
+            cv2.circle(img, (u, v_px), 6, (255, 0, 0), -1)  # blue dot
             # label with id and coords in meters
             cv2.putText(
                 img,
                 f"ID {mid} ({mx_m:.2f},{my_m:.2f}) m",
-                (u + 8, v - 8),
+                (u + 8, v_px - 8),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.4,
                 (255, 255, 255),
                 1,
             )
+
+    def draw_viewpoints(self, img):
+        """
+        Optionally draw the 'viewpoint' locations (no effect on behavior).
+
+        Uses the same geometry as the viewpoint strategy:
+          - Penalty-box lane on each side (x ≈ 1 m and x ≈ 5 m in world coords)
+          - y positions: near penalty box, before half, after half, far penalty box
+        """
+        if not self.show_viewpoints:
+            return
+
+        # Convert mm constants -> meters
+        field_length_m = self.field_length_mm / 1000.0  # A = 9 m
+        field_width_m = self.field_width_mm / 1000.0    # B = 6 m
+        penalty_length_m = G / 1000.0                   # 1.65 m
+        penalty_width_m = H / 1000.0                    # 4.0 m
+
+        # Distance from each sideline to penalty-box edge (along width)
+        side_offset_m = (field_width_m - penalty_width_m) / 2.0  # 1.0 m
+        half_line_y_m = field_length_m / 2.0                     # 4.5 m
+        half_offset_m = self.viewpoint_half_offset_m
+
+        penalty_near_y = penalty_length_m                         # ~1.65
+        penalty_far_y = field_length_m - penalty_length_m         # ~7.35
+        pre_half_y = half_line_y_m - half_offset_m
+        post_half_y = half_line_y_m + half_offset_m
+
+        def lane_x(side: str) -> float:
+            if side == "right":
+                # Right sideline is x=0, so lane is offset inside the field
+                return side_offset_m
+            else:  # 'left'
+                # Left sideline is x=field_width_m
+                return field_width_m - side_offset_m
+
+        sides_to_draw = []
+        if self.viewpoint_side == "both":
+            sides_to_draw = ["right", "left"]
+        else:
+            sides_to_draw = [self.viewpoint_side]
+
+        for side in sides_to_draw:
+            x_lane = lane_x(side)
+            points_m = [
+                (x_lane, penalty_near_y),
+                (x_lane, pre_half_y),
+                (x_lane, post_half_y),
+                (x_lane, penalty_far_y),
+            ]
+
+            # Different colors per side (BGR)
+            color = (255, 255, 0) if side == "right" else (255, 0, 255)
+
+            prev_uv = None
+            for idx, (x_m, y_m) in enumerate(points_m):
+                x_mm = x_m * 1000.0
+                y_mm = y_m * 1000.0
+                u, v_px = self.world_to_pixel(x_mm, y_mm)
+
+                # Draw viewpoint point
+                cv2.circle(img, (u, v_px), 6, color, -1)
+
+                # Label: R1..R4 or L1..L4
+                label = f"{'R' if side == 'right' else 'L'}{idx + 1}"
+                cv2.putText(
+                    img,
+                    label,
+                    (u + 8, v_px - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    2,
+                )
+
+                # Connect them with a line for clarity
+                if prev_uv is not None:
+                    cv2.line(img, prev_uv, (u, v_px), color, 2)
+                prev_uv = (u, v_px)
 
     def draw_marker_ranges_from_rover(self, img, rover_u, rover_v):
         """Draw lines from rover to each currently detected marker with distance text."""
@@ -560,6 +655,9 @@ class FieldVisualizationNode(Node):
 
         # Draw static marker positions
         self.draw_static_markers(field)
+
+        # NEW: optionally draw the viewpoint points/path
+        self.draw_viewpoints(field)
 
         if self.latest_pose is None:
             cv2.putText(

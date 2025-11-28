@@ -1,323 +1,804 @@
-"""
-Viewpoint Navigation Strategy.
+#!/usr/bin/env python3
 
-Idea:
-- We have a small set of hard-coded "viewpoints" on the field where
-  marker detection / localization works well.
-- The strategy moves the robot from its current pose through each
-  viewpoint in sequence, and finally to the goal (target_x, target_y)
-  provided by follow.py.
-- For each waypoint we use an ORIENT -> DRIVE pattern (turn in place,
-  then drive forward) similar to OrientThenDriveStrategy.
-- At each intermediate viewpoint we can optionally "dwell" (stop for a
-  short time) to let the localization stack update from markers.
-
-Notes:
-- Coordinates are in the same world frame as /robot_pose.
-- Obstacles are currently ignored, but are available for future logic
-  (e.g. choosing between alternative viewpoint paths).
-"""
-
+import os
 import math
-from enum import Enum
-from typing import List, Tuple, Optional
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped, Vector3
+from perception_msgs.msg import MarkerPoseArray
+from ament_index_python.packages import get_package_share_directory
 
-from geometry_msgs.msg import Twist, Vector3
-
-from .base_strategy import BaseNavigationStrategy
-
-
-class NavigationPhase(Enum):
-    """Current phase of motion w.r.t. the active waypoint."""
-    ORIENT = "orient"
-    DRIVE = "drive"
-    COMPLETE = "complete"
+import cv2
+import numpy as np
+import yaml
 
 
-class ViewpointStrategy(BaseNavigationStrategy):
+def quaternion_to_yaw(x, y, z, w):
+    """Convert quaternion to yaw angle in radians."""
+    # yaw (z-axis rotation)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return yaw
+
+# --- Field drawing constants and helper ---
+# Dimensions in mm (soccer field spec used for drawing)
+A = 9000  # field length
+B = 6000  # field width
+C = 50    # line width
+D = 100   # penalty mark size (diameter)
+E = 600   # goal area length
+F = 2200  # goal area width
+G = 1650  # penalty area length
+H = 4000  # penalty area width
+I = 1300  # penalty mark distance from goal line
+J = 1500  # center circle diameter
+
+
+def draw_field(scale_px_per_mm: float = 0.1):
     """
-    Navigation strategy that chains ORIENT->DRIVE segments through a set
-    of predefined "viewpoints" and then goes to the final goal.
+    Returns a BGR OpenCV image of the field drawn to scale.
 
-    The final goal is always the (target_x, target_y) that follow.py
-    passes in on each control step. The intermediate viewpoints are
-    hard-coded here for now, but can later be made parametric or chosen
-    based on perception (e.g. which markers / rovers are visible).
+    scale_px_per_mm: how many pixels per mm (0.1 → 900x600 px image)
+    """
+    field_w_px = int(A * scale_px_per_mm)
+    field_h_px = int(B * scale_px_per_mm)
+
+    # green background
+    img = np.full((field_h_px, field_w_px, 3), (0, 128, 0), dtype=np.uint8)
+
+    def to_px(x_mm, y_mm):
+        """Convert (x,y) in mm (origin bottom-left) -> (u,v) pixels (origin top-left)."""
+        u = int(x_mm * scale_px_per_mm)
+        v = field_h_px - int(y_mm * scale_px_per_mm)
+        return u, v
+
+    line_thickness = max(1, int(C * scale_px_per_mm))
+
+    # --- Outer field rectangle ---
+    bl = to_px(0, 0)
+    tr = to_px(A, B)
+    cv2.rectangle(img, bl, tr, (255, 255, 255), line_thickness)
+
+    # --- Halfway line ---
+    mid_x = A / 2
+    p1 = to_px(mid_x, 0)
+    p2 = to_px(mid_x, B)
+    cv2.line(img, p1, p2, (255, 255, 255), line_thickness)
+
+    # --- Center circle ---
+    center = to_px(mid_x, B / 2)
+    radius_px = int((J / 2) * scale_px_per_mm)
+    cv2.circle(img, center, radius_px, (255, 255, 255), line_thickness)
+
+    # --- Left penalty area ---
+    goal_center_y = B / 2
+    pa_half_w = H / 2
+    pa_left_x = 0
+    pa_right_x = G
+
+    pa_bottom_y = goal_center_y - pa_half_w
+    pa_top_y = goal_center_y + pa_half_w
+
+    p_bl = to_px(pa_left_x, pa_bottom_y)
+    p_tr = to_px(pa_right_x, pa_top_y)
+    cv2.rectangle(img, p_bl, p_tr, (255, 255, 255), line_thickness)
+
+    # --- Left goal area ---
+    ga_half_w = F / 2
+    ga_left_x = 0
+    ga_right_x = E
+    ga_bottom_y = goal_center_y - ga_half_w
+    ga_top_y = goal_center_y + ga_half_w
+
+    p_bl = to_px(ga_left_x, ga_bottom_y)
+    p_tr = to_px(ga_right_x, ga_top_y)
+    cv2.rectangle(img, p_bl, p_tr, (255, 255, 255), line_thickness)
+
+    # --- Left penalty mark ---
+    pm_x = I
+    pm_y = goal_center_y
+    pm_center = to_px(pm_x, pm_y)
+    pm_radius_px = max(1, int((D / 2) * scale_px_per_mm))
+    cv2.circle(img, pm_center, pm_radius_px, (255, 255, 255), -1)
+
+    # --- Right side: mirror everything around center line ---
+    pa_left_x_r = A - G
+    pa_right_x_r = A
+    p_bl = to_px(pa_left_x_r, pa_bottom_y)
+    p_tr = to_px(pa_right_x_r, pa_top_y)
+    cv2.rectangle(img, p_bl, p_tr, (255, 255, 255), line_thickness)
+
+    ga_left_x_r = A - E
+    ga_right_x_r = A
+    p_bl = to_px(ga_left_x_r, ga_bottom_y)
+    p_tr = to_px(ga_right_x_r, ga_top_y)
+    cv2.rectangle(img, p_bl, p_tr, (255, 255, 255), line_thickness)
+
+    pm_x_r = A - I
+    pm_center_r = to_px(pm_x_r, pm_y)
+    cv2.circle(img, pm_center_r, pm_radius_px, (255, 255, 255), -1)
+
+    return img
+
+
+class FieldVisualizationNode(Node):
+    """
+    Visualize the rover's global pose and triangulation geometry on a soccer field.
+
+    Subscribes:
+        - /robot_pose      (geometry_msgs/PoseStamped)   [meters, world frame]
+        - /detected_markers (perception_msgs/MarkerPoseArray)
+
+    Uses marker_map from markers.yaml to:
+        - draw all markers at their global coordinates,
+        - draw lines from rover to each currently detected marker,
+        - annotate those lines with distances.
     """
 
-    def __init__(
-        self,
-        safe_distance: float = 1.0,
-        repulse_strength: float = 1.0,
-        goal_tolerance: float = 0.1,
-        max_linear_velocity: float = 0.2,
-        angular_gain: float = 1.0,
-        orientation_tolerance: float = 0.15,   # radians
-        max_angular_velocity: float = 1.0,     # rad/s
-        control_dt: float = 0.05,              # must match follow.py timer
-        dwell_time_at_viewpoint: float = 1.0,  # seconds to pause at each VP
-        viewpoints: Optional[List[Tuple[float, float]]] = None,
-        **kwargs,
-    ):
-        """
-        Args:
-            safe_distance, repulse_strength: kept for compatibility with
-                other strategies; not yet used in this basic version.
-            goal_tolerance: distance threshold for "reached waypoint".
-            max_linear_velocity: forward speed when driving (m/s).
-            angular_gain: proportional gain for heading control.
-            orientation_tolerance: allowed heading error before switching
-                ORIENT -> DRIVE (rad).
-            max_angular_velocity: clamp for angular speed (rad/s).
-            control_dt: control-loop period (seconds).
-            dwell_time_at_viewpoint: how long to stop at each intermediate
-                viewpoint (seconds). Set to 0.0 to not dwell.
-            viewpoints: list of (x, y) in world frame where we want to
-                localize / see markers well. If None, a simple default
-                path is used.
-        """
-        self.safe_distance = safe_distance
-        self.repulse_strength = repulse_strength
-        self.goal_tolerance = goal_tolerance
-        self.max_linear_velocity = max_linear_velocity
-        self.angular_gain = angular_gain
-        self.orientation_tolerance = orientation_tolerance
-        self.max_angular_velocity = max_angular_velocity
-        self.control_dt = control_dt
+    def __init__(self):
+        super().__init__("field_visualization_node")
 
-        # Hard-coded viewpoints for now.
-        # TODO: tune these for your actual AprilTag-rich regions.
-        if viewpoints is None:
-            # Example: three viewpoints going "forward" along x.
-            # Replace with positions that make sense in your field.
-            self.viewpoints: List[Tuple[float, float]] = [
-                (1.5, 0.0),
-                (3.0, 0.5),
-                (4.5, 0.0),
-            ]
-        else:
-            self.viewpoints = list(viewpoints)
-
-        # Index in the list [viewpoints..., final_goal]
-        self.current_waypoint_index: int = 0
-        self.phase: NavigationPhase = NavigationPhase.ORIENT
-
-        # Dwell duration (in control steps) at each intermediate viewpoint
-        self.dwell_steps_required = (
-            int(dwell_time_at_viewpoint / control_dt)
-            if dwell_time_at_viewpoint > 0.0
-            else 0
+        # --- Parameters ---
+        default_field_img = os.path.join(
+            get_package_share_directory("visualizations"),
+            "data",
+            "field.png",
         )
-        self._reset_dwell_state()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+        self.declare_parameter("field_image", default_field_img)
+        self.declare_parameter("draw_field", True)
+        self.declare_parameter("scale_px_per_mm", 0.1)
+        self.declare_parameter("field_length_mm", 9000.0)
+        self.declare_parameter("field_width_mm", 6000.0)
+        # kept for compatibility, but world_to_pixel uses your custom convention
+        self.declare_parameter("origin_at_center", False)
 
-    def _reset_dwell_state(self) -> None:
-        self.in_dwell: bool = False
-        self.dwell_steps_done: int = 0
+        # Allow selecting buffered markers or custom topics
+        self.declare_parameter("use_buffered_markers", False)
+        # if empty, chosen based on use_buffered_markers
+        self.declare_parameter("marker_topic", "")
+        self.declare_parameter("pose_topic", "/robot_pose")
 
-    def _full_path(
-        self, target_x: float, target_y: float
-    ) -> List[Tuple[float, float]]:
-        """
-        Returns the full list of waypoints for this run: all viewpoints
-        plus the final goal.
-        """
-        return self.viewpoints + [(target_x, target_y)]
+        # marker config (same default as triangulation_node)
+        self.declare_parameter("marker_config", "config/markers.yaml")
 
-    @staticmethod
-    def _angle_diff(a: float, b: float) -> float:
-        """Shortest signed angular difference a - b in [-pi, pi]."""
-        d = a - b
-        return math.atan2(math.sin(d), math.cos(d))
+        # NEW: viewpoint visualization flags (all default -> no behavior change)
+        self.declare_parameter("show_viewpoints", False)
+        self.declare_parameter("viewpoint_side", "both")          # 'left'/'right'/'both'
+        self.declare_parameter("viewpoint_half_offset_m", 1.0)    # before/after half-line
 
-    @staticmethod
-    def _clamp(v: float, lo: float, hi: float) -> float:
-        return max(lo, min(hi, v))
+        field_image_path = self.get_parameter("field_image").value
+        self.draw_field_flag = bool(self.get_parameter("draw_field").value)
+        self.scale_px_per_mm = float(
+            self.get_parameter("scale_px_per_mm").value)
+        self.field_length_mm = float(
+            self.get_parameter("field_length_mm").value)
+        self.field_width_mm = float(self.get_parameter("field_width_mm").value)
+        self.origin_at_center = bool(
+            self.get_parameter("origin_at_center").value)
+        self.use_buffered_markers = bool(
+            self.get_parameter("use_buffered_markers").value)
+        self.marker_topic_param = str(self.get_parameter("marker_topic").value)
+        self.pose_topic = str(self.get_parameter("pose_topic").value)
 
-    # ------------------------------------------------------------------
-    # BaseNavigationStrategy interface
-    # ------------------------------------------------------------------
+        # NEW: viewpoint params -> attributes
+        self.show_viewpoints = bool(
+            self.get_parameter("show_viewpoints").value
+        )
+        self.viewpoint_side = str(
+            self.get_parameter("viewpoint_side").value
+        ).lower()
+        if self.viewpoint_side not in ("left", "right", "both"):
+            self.viewpoint_side = "both"
+        self.viewpoint_half_offset_m = float(
+            self.get_parameter("viewpoint_half_offset_m").value
+        )
 
-    def compute_control(
-        self,
-        robot_x: float,
-        robot_y: float,
-        robot_yaw: float,
-        target_x: float,
-        target_y: float,
-        obstacles,
-    ):
-        """
-        Move through viewpoints then to final target.
-
-        Returns:
-            (Twist, heading_vector, goal_reached)
-            goal_reached is True only when the *final* target is reached
-            (not for intermediate viewpoints).
-        """
-        path = self._full_path(target_x, target_y)
-        last_index = len(path) - 1
-
-        # Clamp index in case something weird happens
-        if self.current_waypoint_index > last_index:
-            self.current_waypoint_index = last_index
-
-        goal_x, goal_y = path[self.current_waypoint_index]
-        is_final_goal = self.current_waypoint_index == last_index
-
-        dx = goal_x - robot_x
-        dy = goal_y - robot_y
-        distance = math.hypot(dx, dy)
-
-        # --------------------------------------------------------------
-        # 1. Check if we have reached the current waypoint
-        # --------------------------------------------------------------
-        if distance < self.goal_tolerance:
-            # Final goal reached: stop and signal completion
-            if is_final_goal:
-                self.phase = NavigationPhase.COMPLETE
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0
-                return cmd, None, True
-
-            # Intermediate viewpoint reached:
-            # optionally dwell here to localize from markers
-            if self.dwell_steps_required > 0 and not self.in_dwell:
-                self.in_dwell = True
-                self.dwell_steps_done = 0
-
-            if self.in_dwell:
-                self.dwell_steps_done += 1
-
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0
-
-                heading_vec = Vector3()
-                heading_vec.x = math.cos(robot_yaw)
-                heading_vec.y = math.sin(robot_yaw)
-                heading_vec.z = 0.0
-
-                # After we've dwelled long enough, advance to next VP
-                if self.dwell_steps_done >= self.dwell_steps_required:
-                    self.in_dwell = False
-                    self.dwell_steps_done = 0
-                    self.current_waypoint_index += 1
-                    self.phase = NavigationPhase.ORIENT
-
-                # While dwelling we never claim the final goal is reached
-                return cmd, heading_vec, False
-
-            # No dwell configured: jump to next viewpoint but emit a stop
-            self.current_waypoint_index += 1
-            self.phase = NavigationPhase.ORIENT
-
-            cmd = Twist()
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-            return cmd, None, False
-
-        # --------------------------------------------------------------
-        # 2. Not yet at waypoint -> ORIENT / DRIVE logic
-        # --------------------------------------------------------------
-
-        target_heading = math.atan2(dy, dx)
-        heading_error = self._angle_diff(target_heading, robot_yaw)
-
-        heading_vec = Vector3()
-        heading_vec.x = math.cos(target_heading)
-        heading_vec.y = math.sin(target_heading)
-        heading_vec.z = 0.0
-
-        # Phase: ORIENT
-        if self.phase == NavigationPhase.ORIENT:
-            if abs(heading_error) < self.orientation_tolerance:
-                self.phase = NavigationPhase.DRIVE
-            else:
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = self._clamp(
-                    self.angular_gain * heading_error,
-                    -self.max_angular_velocity,
-                    self.max_angular_velocity,
+        # --- Load marker_map from YAML (in meters) ---
+        config_path = self.get_parameter("marker_config").value
+        if not os.path.isabs(config_path):
+            try:
+                perception_share = get_package_share_directory("perception")
+                config_path = os.path.join(perception_share, config_path)
+            except Exception as e:
+                self.get_logger().warn(
+                    f"Could not resolve perception share dir: {e}. "
+                    f"Using marker_config path as-is: {config_path}"
                 )
-                return cmd, heading_vec, False
 
-        # Phase: DRIVE
-        if self.phase == NavigationPhase.DRIVE:
-            # If we drift too far in heading, go back to ORIENT
-            if abs(heading_error) > self.orientation_tolerance * 2.0:
-                self.phase = NavigationPhase.ORIENT
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = self._clamp(
-                    self.angular_gain * heading_error,
-                    -self.max_angular_velocity,
-                    self.max_angular_velocity,
+        self.marker_map = self.load_marker_config(config_path)
+        self.get_logger().info(
+            f"Loaded {len(self.marker_map)} markers from {config_path}"
+        )
+
+        # --- Create / Load field image ---
+        if self.draw_field_flag:
+            try:
+                self.field_img = draw_field(
+                    scale_px_per_mm=self.scale_px_per_mm)
+                self.get_logger().info(
+                    f"Using programmatically drawn field (scale={self.scale_px_per_mm} px/mm)."
                 )
-                return cmd, heading_vec, False
+            except Exception as e:
+                self.get_logger().warn(
+                    f"draw_field failed: {e}. Falling back to image file."
+                )
+                self.field_img = cv2.imread(field_image_path, cv2.IMREAD_COLOR)
+        else:
+            self.field_img = cv2.imread(field_image_path, cv2.IMREAD_COLOR)
 
-            cmd = Twist()
-            cmd.linear.x = self.max_linear_velocity
-            cmd.angular.z = self._clamp(
-                self.angular_gain * heading_error,
-                -self.max_angular_velocity,
-                self.max_angular_velocity,
+        if self.field_img is None:
+            self.get_logger().warn(
+                f"Could not load field image at '{field_image_path}'. Using a blank field instead."
             )
-            return cmd, heading_vec, False
+            self.field_img = np.full(
+                (600, 900, 3), (0, 128, 0), dtype=np.uint8)
 
-        # Should not really get here; default to stop
-        cmd = Twist()
-        cmd.linear.x = 0.0
-        cmd.angular.z = 0.0
-        return cmd, None, False
+        self.field_h, self.field_w = self.field_img.shape[:2]
 
-    def reset(self) -> None:
-        """Reset strategy state to initial conditions."""
-        self.current_waypoint_index = 0
-        self.phase = NavigationPhase.ORIENT
-        self._reset_dwell_state()
+        # Scale factors: pixels per mm
+        self.px_per_mm_x = self.field_w / self.field_length_mm
+        self.px_per_mm_y = self.field_h / self.field_width_mm
 
-    def is_goal_reached(
-        self,
-        robot_x: float,
-        robot_y: float,
-        target_x: float,
-        target_y: float,
-    ) -> bool:
+        self.get_logger().info(
+            f"Field image size: {self.field_w}x{self.field_h} px "
+            f"(scale: {self.px_per_mm_x:.3f} px/mm, {self.px_per_mm_y:.3f} px/mm)"
+        )
+
+        # Latest pose & detections
+        self.latest_pose: PoseStamped | None = None
+        self.latest_markers = []
+        self.latest_oak_markers = []
+
+        # --- Subscriptions ---
+        # Determine the marker topic: explicit `marker_topic` param wins,
+        # otherwise select buffered or unbuffered topic based on `use_buffered_markers`.
+        if self.marker_topic_param:
+            marker_topic = self.marker_topic_param
+        else:
+            marker_topic = "/detected_markers_buffered" if self.use_buffered_markers else "/detected_markers"
+
+        self.pose_sub = self.create_subscription(
+            PoseStamped, self.pose_topic, self.pose_callback, 10)
+        self.markers_sub = self.create_subscription(
+            MarkerPoseArray, marker_topic, self.markers_callback, 10)
+        self.oak_markers_sub = self.create_subscription(
+            MarkerPoseArray, "/oak/detected_markers", self.oak_markers_callback, 10)
+        self.latest_vector = None
+        self.vector_sub = self.create_subscription(
+            Vector3,
+            "/control/heading_vector",
+            self.vector_callback,
+            10
+        )
+
+        self.get_logger().info(
+            f"FieldVisualization listening to pose: {self.pose_topic}, markers: {marker_topic}, oak_markers: /oak/detected_markers")
+
+        # --- Timer for rendering ---
+        self.timer = self.create_timer(0.1, self.render)  # 10 Hz
+
+        # Window
+        cv2.namedWindow("Rover on Field", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Rover on Field", 900, 600)
+
+        self.get_logger().info("FieldVisualizationNode started.")
+
+    # ------------------------------------------------------------------ #
+    # Config loader
+    # ------------------------------------------------------------------ #
+
+    def load_marker_config(self, path):
+        """Load marker world coordinates from YAML. Returns {id: (x_m, y_m)}."""
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f)
+            marker_map = {int(k): tuple(v)
+                          for k, v in data["marker_map"].items()}
+            return marker_map
+        except Exception as e:
+            self.get_logger().error(
+                f"Failed to load marker config from {path}: {e}")
+            return {}
+
+    # ------------------------------------------------------------------ #
+    # Callbacks
+    # ------------------------------------------------------------------ #
+
+    def pose_callback(self, msg: PoseStamped):
+        if msg.header.frame_id and msg.header.frame_id != "world":
+            self.get_logger().warn_once(
+                f"Pose frame_id is '{msg.header.frame_id}', expected 'world'."
+            )
+        self.latest_pose = msg
+
+    def markers_callback(self, msg: MarkerPoseArray):
+        self.latest_markers = msg.markers
+
+    def oak_markers_callback(self, msg: MarkerPoseArray):
+        self.latest_oak_markers = msg.markers
+
+    def vector_callback(self, msg: Vector3):
+        self.latest_vector = (msg.x, msg.y)
+    # ------------------------------------------------------------------ #
+    # Coordinate mapping
+    # ------------------------------------------------------------------ #
+
+    def world_to_pixel(self, x_world_mm: float, y_world_mm: float):
         """
-        Only checks the *final* goal, not the intermediate viewpoints.
-        """
-        dx = target_x - robot_x
-        dy = target_y - robot_y
-        return math.hypot(dx, dy) < self.goal_tolerance
+        Map world coordinates [mm] -> image pixel (u, v).
 
-    def get_parameters(self) -> dict:
-        """Return current tunable parameters (for debugging / introspection)."""
-        return {
-            "safe_distance": self.safe_distance,
-            "repulse_strength": self.repulse_strength,
-            "goal_tolerance": self.goal_tolerance,
-            "max_linear_velocity": self.max_linear_velocity,
-            "angular_gain": self.angular_gain,
-            "orientation_tolerance": self.orientation_tolerance,
-            "max_angular_velocity": self.max_angular_velocity,
-            "viewpoints": self.viewpoints,
-            "current_waypoint_index": self.current_waypoint_index,
-            "phase": self.phase.value,
-        }
+        YOUR convention:
+          - Origin (0,0) at BOTTOM-RIGHT corner of the field.
+          - +X: up along field width (0 -> 6000 mm).
+          - +Y: left along field length (0 -> 9000 mm).
 
-    def set_parameters(self, params: dict) -> None:
+        Drawing convention (field_img):
+          - Origin at bottom-left.
+          - x_std: along field length, left -> right, 0..field_length_mm.
+          - y_std: along field width, bottom -> top, 0..field_width_mm.
         """
-        Simple parameter updating helper. You can call this from outside
-        if you want to adjust gains or viewpoints at runtime.
+        A_mm = self.field_length_mm   # 9000
+        B_mm = self.field_width_mm    # 6000
+
+        # Clamp incoming values to physical extents
+        x_world_mm = float(np.clip(x_world_mm, 0.0, B_mm))
+        y_world_mm = float(np.clip(y_world_mm, 0.0, A_mm))
+
+        # Transform:
+        #   x_std_mm = A - Y_world   (right-origin -> left-origin)
+        #   y_std_mm = X_world      (bottom-origin -> bottom-origin)
+        x_std_mm = A_mm - y_world_mm
+        y_std_mm = x_world_mm
+
+        # Convert to pixel coordinates
+        u = int(x_std_mm * self.px_per_mm_x)
+        v = int(self.field_h - y_std_mm * self.px_per_mm_y)
+
+        return u, v
+
+    # ------------------------------------------------------------------ #
+    # Drawing helpers
+    # ------------------------------------------------------------------ #
+
+    def draw_static_markers(self, img):
+        """Draw all markers from marker_map (global positions)."""
+        for mid, v in self.marker_map.items():
+            mx_m, my_m, _ = v
+            x_mm = mx_m * 1000.0
+            y_mm = my_m * 1000.0
+            u, v_px = self.world_to_pixel(x_mm, y_mm)
+
+            # marker dot
+            cv2.circle(img, (u, v_px), 6, (255, 0, 0), -1)  # blue dot
+            # label with id and coords in meters
+            cv2.putText(
+                img,
+                f"ID {mid} ({mx_m:.2f},{my_m:.2f}) m",
+                (u + 8, v_px - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (255, 255, 255),
+                1,
+            )
+
+    def draw_viewpoints(self, img):
         """
-        for key, value in params.items():
-            if key == "viewpoints":
-                self.viewpoints = list(value)
-            elif hasattr(self, key):
-                setattr(self, key, value)
+        Optionally draw the 'viewpoint' locations (no effect on behavior).
+
+        Uses the same geometry as the viewpoint strategy:
+          - Penalty-box lane on each side (x ≈ 1 m and x ≈ 5 m in world coords)
+          - y positions: near penalty box, before half, after half, far penalty box
+        """
+        if not self.show_viewpoints:
+            return
+
+        # Convert mm constants -> meters
+        field_length_m = self.field_length_mm / 1000.0  # A = 9 m
+        field_width_m = self.field_width_mm / 1000.0    # B = 6 m
+        penalty_length_m = G / 1000.0                   # 1.65 m
+        penalty_width_m = H / 1000.0                    # 4.0 m
+
+        # Distance from each sideline to penalty-box edge (along width)
+        side_offset_m = (field_width_m - penalty_width_m) / 2.0  # 1.0 m
+        half_line_y_m = field_length_m / 2.0                     # 4.5 m
+        half_offset_m = self.viewpoint_half_offset_m
+
+        penalty_near_y = penalty_length_m                         # ~1.65
+        penalty_far_y = field_length_m - penalty_length_m         # ~7.35
+        pre_half_y = half_line_y_m - half_offset_m
+        post_half_y = half_line_y_m + half_offset_m
+
+        def lane_x(side: str) -> float:
+            if side == "right":
+                # Right sideline is x=0, so lane is offset inside the field
+                return side_offset_m
+            else:  # 'left'
+                # Left sideline is x=field_width_m
+                return field_width_m - side_offset_m
+
+        sides_to_draw = []
+        if self.viewpoint_side == "both":
+            sides_to_draw = ["right", "left"]
+        else:
+            sides_to_draw = [self.viewpoint_side]
+
+        for side in sides_to_draw:
+            x_lane = lane_x(side)
+            points_m = [
+                (x_lane, penalty_near_y),
+                (x_lane, pre_half_y),
+                (x_lane, post_half_y),
+                (x_lane, penalty_far_y),
+            ]
+
+            # Different colors per side (BGR)
+            color = (255, 255, 0) if side == "right" else (255, 0, 255)
+
+            prev_uv = None
+            for idx, (x_m, y_m) in enumerate(points_m):
+                x_mm = x_m * 1000.0
+                y_mm = y_m * 1000.0
+                u, v_px = self.world_to_pixel(x_mm, y_mm)
+
+                # Draw viewpoint point
+                cv2.circle(img, (u, v_px), 6, color, -1)
+
+                # Label: R1..R4 or L1..L4
+                label = f"{'R' if side == 'right' else 'L'}{idx + 1}"
+                cv2.putText(
+                    img,
+                    label,
+                    (u + 8, v_px - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    2,
+                )
+
+                # Connect them with a line for clarity
+                if prev_uv is not None:
+                    cv2.line(img, prev_uv, (u, v_px), color, 2)
+                prev_uv = (u, v_px)
+
+    def draw_marker_ranges_from_rover(self, img, rover_u, rover_v):
+        """Draw lines from rover to each currently detected marker with distance text."""
+        if self.latest_markers is None:
+            return
+
+        for m in self.latest_markers:
+            if m.id not in self.marker_map:
+                continue
+
+            mx_m, my_m, _ = self.marker_map[m.id]
+            x_mm = mx_m * 1000.0
+            y_mm = my_m * 1000.0
+            mu, mv = self.world_to_pixel(x_mm, y_mm)
+
+            # line from rover -> marker
+            cv2.line(img, (rover_u, rover_v), (mu, mv), (0, 255, 255), 2)
+
+            # distance label around the midpoint of the line
+            mid_u = int((rover_u + mu) / 2)
+            mid_v = int((rover_v + mv) / 2)
+            cv2.putText(
+                img,
+                f"ID {m.id} : {m.distance:.2f} m",
+                (mid_u + 5, mid_v - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                3,
+            )
+            cv2.putText(
+                img,
+                f"ID {m.id} : {m.distance:.2f} m",
+                (mid_u + 5, mid_v - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+            )
+
+            # Optional: draw distance circle around marker (triangulation geometry)
+            # approximate px-per-mm isotropically
+            avg_px_per_mm = 0.5 * (self.px_per_mm_x + self.px_per_mm_y)
+            radius_px = int(m.distance * 1000.0 * avg_px_per_mm)
+            if radius_px > 0 and radius_px < 5000:  # avoid crazy values
+                cv2.circle(img, (mu, mv), radius_px, (128, 128, 255), 1)
+
+    def draw_oak_marker_ranges_from_rover(self, img, rover_u, rover_v):
+        """Draw lines from rover to each OAK detected marker in oak brown color."""
+        if not self.latest_oak_markers:
+            return
+
+        # Oak brown color (BGR format): a nice brown shade
+        oak_brown = (19, 69, 139)  # RGB(139, 69, 19) = Saddle Brown
+
+        for m in self.latest_oak_markers:
+            if m.id not in self.marker_map:
+                continue
+
+            mx_m, my_m, _ = self.marker_map[m.id]
+            x_mm = mx_m * 1000.0
+            y_mm = my_m * 1000.0
+            mu, mv = self.world_to_pixel(x_mm, y_mm)
+
+            # line from rover -> marker in oak brown
+            cv2.line(img, (rover_u, rover_v), (mu, mv), oak_brown, 2)
+
+            # distance label around the midpoint of the line
+            mid_u = int((rover_u + mu) / 2)
+            mid_v = int((rover_v + mv) / 2)
+
+            # Black outline for text
+            cv2.putText(
+                img,
+                f"OAK {m.id} : {m.distance:.2f} m",
+                (mid_u + 5, mid_v + 15),  # Offset slightly down from regular markers
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                3,
+            )
+            # Oak brown text
+            cv2.putText(
+                img,
+                f"OAK {m.id} : {m.distance:.2f} m",
+                (mid_u + 5, mid_v + 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                oak_brown,
+                1,
+            )
+
+            # Optional: draw distance circle around marker in oak brown
+            avg_px_per_mm = 0.5 * (self.px_per_mm_x + self.px_per_mm_y)
+            radius_px = int(m.distance * 1000.0 * avg_px_per_mm)
+            if radius_px > 0 and radius_px < 5000:  # avoid crazy values
+                cv2.circle(img, (mu, mv), radius_px, oak_brown, 1)
+
+    def draw_heading_vector(self, img, rover_u, rover_v):
+        if self.latest_vector is None:
+            return
+
+        vx, vy = self.latest_vector
+
+        # Scale for visibility — field is large, actual vector is unit length
+        scale = 60  # pixels to draw
+
+        # Convert (vx, vy) from world meters to pixel direction
+        end_u = int(rover_u + vx * scale)
+        # invert y because image pixels go downward
+        end_v = int(rover_v - vy * scale)
+
+        # Draw main arrow line
+        cv2.arrowedLine(
+            img,
+            (rover_u, rover_v),
+            (end_u, end_v),
+            (255, 0, 0),  # red arrow
+            3,
+            tipLength=0.1,
+        )
+
+    def draw_robot_orientation(self, img, rover_u, rover_v, yaw):
+        """Draw an arrow showing the robot's orientation (yaw) and display the angle."""
+        # Arrow length in pixels
+        arrow_length = 80
+
+        # Calculate arrow endpoint based on yaw
+        # Note: yaw is in world frame, need to account for coordinate transform
+        # In world frame: yaw=0 points in +X direction (right in world coords)
+        # We need to transform this to pixel coordinates
+
+        # World coordinates: X is forward, Y is left
+        # Our pixel transform: x_std = A - Y_world, y_std = X_world
+        # So we need to rotate the yaw accordingly
+
+        # Calculate direction in world frame
+        dx_world = math.cos(yaw)
+        dy_world = math.sin(yaw)
+
+        # Transform to pixel direction
+        # Since x_std = A - y_world and y_std = x_world
+        # dx_pixel corresponds to -dy_world
+        # dy_pixel corresponds to dx_world (but inverted for screen coords)
+        end_u = int(rover_u - dy_world * arrow_length)
+        end_v = int(rover_v - dx_world * arrow_length)
+
+        # Draw the orientation arrow (cyan color to distinguish from heading vector)
+        cv2.arrowedLine(
+            img,
+            (rover_u, rover_v),
+            (end_u, end_v),
+            (255, 255, 0),  # cyan arrow
+            4,
+            tipLength=0.3,
+        )
+
+        # Display the yaw angle in degrees near the robot
+        yaw_deg = math.degrees(yaw)
+        cv2.putText(
+            img,
+            f"Yaw: {yaw_deg:.1f}°",
+            (rover_u + 15, rover_v + 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),  # black outline
+            3,
+        )
+        cv2.putText(
+            img,
+            f"Yaw: {yaw_deg:.1f}°",
+            (rover_u + 15, rover_v + 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 0),  # cyan text
+            2,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Render loop
+    # ------------------------------------------------------------------ #
+
+    def render(self):
+        key = cv2.waitKey(1) & 0xFF
+        if key in (27, ord("q")):
+            self.get_logger().info("Closing FieldVisualizationNode window.")
+            rclpy.shutdown()
+            return
+
+        # Base field
+        field = self.field_img.copy()
+
+        # Draw static marker positions
+        self.draw_static_markers(field)
+
+        # NEW: optionally draw the viewpoint points/path
+        self.draw_viewpoints(field)
+
+        if self.latest_pose is None:
+            cv2.putText(
+                field,
+                "Waiting for /robot_pose...",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 255),
+                2,
+            )
+            cv2.imshow("Rover on Field", field)
+            return
+
+        # Extract robot pose in meters
+        x_m = self.latest_pose.pose.position.x
+        y_m = self.latest_pose.pose.position.y
+
+        # Extract yaw from quaternion
+        qx = self.latest_pose.pose.orientation.x
+        qy = self.latest_pose.pose.orientation.y
+        qz = self.latest_pose.pose.orientation.z
+        qw = self.latest_pose.pose.orientation.w
+        yaw = quaternion_to_yaw(qx, qy, qz, qw)
+
+        # Convert to mm for mapping
+        x_mm = x_m * 1000.0
+        y_mm = y_m * 1000.0
+
+        rover_u, rover_v = self.world_to_pixel(x_mm, y_mm)
+
+        # Draw rover
+        cv2.circle(field, (rover_u, rover_v), 10, (0, 0, 255), -1)
+        cv2.putText(
+            field,
+            f"Rover ({x_m:.2f}, {y_m:.2f}) m",
+            (rover_u + 15, rover_v - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
+
+        # Draw robot orientation arrow (from triangulation yaw)
+        self.draw_robot_orientation(field, rover_u, rover_v, yaw)
+
+        # Draw steering vector arrow
+        self.draw_heading_vector(field, rover_u, rover_v)
+
+        # Draw lines + distance annotations to visible markers
+        self.draw_marker_ranges_from_rover(field, rover_u, rover_v)
+
+        # Draw lines + distance annotations to OAK detected markers (in oak brown)
+        self.draw_oak_marker_ranges_from_rover(field, rover_u, rover_v)
+
+        # Also show which marker IDs are currently seen
+        visible_ids = [
+            m.id for m in self.latest_markers if m.id in self.marker_map]
+        oak_visible_ids = [
+            m.id for m in self.latest_oak_markers if m.id in self.marker_map]
+
+        cv2.putText(
+            field,
+            f"Visible markers: {visible_ids}",
+            (20, self.field_h - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
+
+        # Show OAK markers if any
+        if oak_visible_ids:
+            cv2.putText(
+                field,
+                f"OAK markers: {oak_visible_ids}",
+                (20, self.field_h - 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (19, 69, 139),  # Oak brown
+                2,
+            )
+
+        cv2.imshow("Rover on Field", field)
+
+    # ------------------------------------------------------------------ #
+
+    def destroy_node(self):
+        cv2.destroyAllWindows()
+        super().destroy_node()
+
+
+def main(args=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Rover-on-field triangulation visualization")
+    parser.add_argument(
+        "--field_image",
+        type=str,
+        default=None,
+        help="Path to field image (PNG/JPG). If not given, uses the package default.",
+    )
+    parser.add_argument(
+        "--origin_at_center",
+        action="store_true",
+        help="(Currently unused) Keep for compatibility.",
+    )
+    parser.add_argument(
+        "--marker_config",
+        type=str,
+        default=None,
+        help="Override path to markers.yaml used for visualization.",
+    )
+    parsed_args, ros_args = parser.parse_known_args()
+
+    rclpy.init(args=ros_args)
+    node = FieldVisualizationNode()
+
+    # Optional CLI overrides
+    params = []
+    if parsed_args.field_image is not None:
+        params.append(node.get_parameter(
+            "field_image").set__string(parsed_args.field_image))
+    if parsed_args.origin_at_center:
+        params.append(node.get_parameter("origin_at_center").set__bool(True))
+    if parsed_args.marker_config is not None:
+        params.append(node.get_parameter(
+            "marker_config").set__string(parsed_args.marker_config))
+
+    if params:
+        node.set_parameters(params)
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

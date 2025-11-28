@@ -6,7 +6,8 @@ from launch.actions import (
     LogInfo,
     IncludeLaunchDescription,
     GroupAction,
-    SetEnvironmentVariable
+    SetEnvironmentVariable,
+    ExecuteProcess
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
@@ -46,22 +47,75 @@ def generate_launch_description():
         default_value="false",
         description="Run only localization stack"
     )
+    use_display_field_arg = DeclareLaunchArgument(
+        "use_display_field",
+        default_value="false",
+        description="Display field visualization"
+    )
 
     gui = LaunchConfiguration("use_gui")
     tilt = LaunchConfiguration("use_tilt")
     cameras_only = LaunchConfiguration("use_cameras_only")
     markers_only = LaunchConfiguration("use_markers_only")
     localization_only = LaunchConfiguration("use_localization_only")
+    display_field = LaunchConfiguration("use_display_field")
 
     ld = LaunchDescription([
         use_gui_arg,
         use_tilt_arg,
         use_cameras_only_arg,
         use_markers_only_arg,
-        use_localization_only_arg
+        use_localization_only_arg,
+        use_display_field_arg
     ])
 
     # ------------------------------------------------------------
+    # Set ROS_DOMAIN_ID
+    ld.add_action(SetEnvironmentVariable('ROS_DOMAIN_ID', '7'))
+    ld.add_action(LogInfo(msg="ROS_DOMAIN_ID = 7"))
+
+    # Kill any existing ugv_bringup processes
+    ld.add_action(ExecuteProcess(
+        cmd="pkill -f 'ros2 run ugv_bringup ugv_bringup' || true",
+        output='screen',
+        shell=True
+    ))
+
+    # Start ugv_bringup
+    ld.add_action(ExecuteProcess(
+        cmd=['ros2', 'run', 'ugv_bringup', 'ugv_bringup'],
+        output='screen',
+        on_exit=LogInfo(msg="ugv_bringup exited")
+    ))
+
+    # Kill any existing ugv_driver processes
+    ld.add_action(ExecuteProcess(
+        cmd="pkill -f 'ros2 run ugv_bringup ugv_driver' || true",
+        output='screen',
+        shell=True
+    ))
+
+    # Start ugv_driver
+    ld.add_action(ExecuteProcess(
+        cmd=['ros2', 'run', 'ugv_bringup', 'ugv_driver'],
+        output='screen',
+        on_exit=LogInfo(msg="ugv_driver exited")
+    ))
+
+    # Kill any existing camera.launch.py processes
+    ld.add_action(ExecuteProcess(
+        cmd="pkill -f 'ros2 launch ugv_vision camera.launch.py' || true",
+        output='screen',
+        shell=True
+    ))
+
+    # Start camera.launch.py
+    ld.add_action(ExecuteProcess(
+        cmd=['ros2', 'launch', 'ugv_vision', 'camera.launch.py'],
+        output='screen',
+        on_exit=LogInfo(msg="camera.launch.py exited")
+    ))
+
     # Environment variables (only when GUI enabled)
     # ------------------------------------------------------------
     ld.add_action(SetEnvironmentVariable(
@@ -96,6 +150,24 @@ def generate_launch_description():
     except PackageNotFoundError:
         ld.add_action(
             LogInfo(msg="ugv_vision not found; skipping OAK include"))
+
+    try:
+        ugv_share = get_package_share_directory('ugv_bringup')
+        lidar_launch = os.path.join(
+            ugv_share, 'launch', 'bringup_lidar.launch.py')
+        if os.path.exists(lidar_launch):
+            ld.add_action(
+                LogInfo(msg=f"Including LIDAR launch: {lidar_launch}"))
+            ld.add_action(
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(lidar_launch))
+            )
+        else:
+            ld.add_action(
+                LogInfo(msg="ugv_bringup found but no bringup_lidar.launch.py"))
+    except PackageNotFoundError:
+        ld.add_action(
+            LogInfo(msg="ugv_bringup not found; skipping LIDAR include"))
 
     # ------------------------------------------------------------
     # Nodes (shared definitions)
@@ -191,7 +263,10 @@ def generate_launch_description():
             actions=[
                 triangulation_node,
                 localization_node,
-                field_vis
+                GroupAction(
+                    condition=IfCondition(display_field),
+                    actions=[field_vis]
+                ),
             ]
         )
     )
@@ -214,12 +289,15 @@ def generate_launch_description():
                                 triangulation_node,
                                 localization_node,
                                 oak_detector,
-                                field_vis,
-                                GroupAction(
-                                    condition=IfCondition(tilt),
-                                    actions=[camera_tilt_node]
-                                )
                             ]
+                        ),
+                        GroupAction(
+                            condition=IfCondition(display_field),
+                            actions=[field_vis]
+                        ),
+                        GroupAction(
+                            condition=IfCondition(tilt),
+                            actions=[camera_tilt_node]
                         )
                     ]
                 )
