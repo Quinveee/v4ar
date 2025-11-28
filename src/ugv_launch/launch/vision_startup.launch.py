@@ -56,6 +56,11 @@ def generate_launch_description():
         default_value="identity",
         description="Localization strategy type"
     )
+    use_rover_detector_arg = DeclareLaunchArgument(
+        "use_rover_detector",
+        default_value="false",
+        description="Enable rover/obstacle detector"
+    )
 
     gui = LaunchConfiguration("use_gui")
     tilt = LaunchConfiguration("use_tilt")
@@ -64,6 +69,7 @@ def generate_launch_description():
     localization_only = LaunchConfiguration("use_localization_only")
     display_field = LaunchConfiguration("use_display_field")
     strategy = LaunchConfiguration("strategy")
+    use_rover_detector = LaunchConfiguration("use_rover_detector")
 
     ld = LaunchDescription([
         use_gui_arg,
@@ -72,7 +78,8 @@ def generate_launch_description():
         use_markers_only_arg,
         use_localization_only_arg,
         use_display_field_arg,
-        strategy_arg
+        strategy_arg,
+        use_rover_detector_arg
     ])
 
     # ------------------------------------------------------------
@@ -195,6 +202,18 @@ def generate_launch_description():
         parameters=[{'pan': 0.15, 'tilt': 0.35}]
     )
 
+    rover_detector_node = Node(
+        package='perception',
+        executable='rover_detector_with_pose',
+        name='rover_detector',
+        output='screen',
+        parameters=[{
+            'no_gui': True,
+            'max_distance': 4.0,
+            'enable_buffer': True,
+        }]
+    )
+
     # ------------------------------------------------------------
     # MODES (Mutually exclusive via conditions)
     # ------------------------------------------------------------
@@ -262,6 +281,10 @@ def generate_launch_description():
                         GroupAction(
                             condition=IfCondition(tilt),
                             actions=[camera_tilt_node]
+                        ),
+                        GroupAction(
+                            condition=IfCondition(use_rover_detector),
+                            actions=[rover_detector_node]
                         )
                     ]
                 )
