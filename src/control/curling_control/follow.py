@@ -76,6 +76,7 @@ class NavigationWithAvoidanceNode(Node):
         self.declare_parameter("goal_tolerance", 0.1)
         self.declare_parameter("max_linear_velocity", 0.1)
         self.declare_parameter("angular_gain", 0.5)
+        self.declare_parameter("grid_dwell_time", 0.0)
 
         # Get parameter values
         strategy_type = self.get_parameter("strategy_type").value
@@ -88,15 +89,36 @@ class NavigationWithAvoidanceNode(Node):
                 )
                 strategy_type = "potential_field"
 
-            # Create strategy with parameters
             strategy_class = AVAILABLE_STRATEGIES[strategy_type]
-            self.strategy = strategy_class(
-                safe_distance=self.get_parameter("safe_distance").value,
-                repulse_strength=self.get_parameter("repulse_strength").value,
-                goal_tolerance=self.get_parameter("goal_tolerance").value,
-                max_linear_velocity=self.get_parameter("max_linear_velocity").value,
-                angular_gain=self.get_parameter("angular_gain").value
-            )
+
+            # Common parameters
+            safe_distance = self.get_parameter("safe_distance").value
+            repulse_strength = self.get_parameter("repulse_strength").value
+            goal_tolerance = self.get_parameter("goal_tolerance").value
+            max_linear_velocity = self.get_parameter("max_linear_velocity").value
+            angular_gain = self.get_parameter("angular_gain").value
+            grid_dwell_time = self.get_parameter("grid_dwell_time").value
+
+            # Create strategy with parameters
+            if strategy_type == "discretized":
+                # Our grid-based strategy supports dwell_time_at_waypoint
+                self.strategy = strategy_class(
+                    safe_distance=safe_distance,
+                    repulse_strength=repulse_strength,
+                    goal_tolerance=goal_tolerance,
+                    max_linear_velocity=max_linear_velocity,
+                    angular_gain=angular_gain,
+                    dwell_time_at_waypoint=grid_dwell_time,
+                )
+            else:
+                # All other strategies: no dwell_time kwarg
+                self.strategy = strategy_class(
+                    safe_distance=safe_distance,
+                    repulse_strength=repulse_strength,
+                    goal_tolerance=goal_tolerance,
+                    max_linear_velocity=max_linear_velocity,
+                    angular_gain=angular_gain,
+                )
         else:
             self.strategy = strategy
 
