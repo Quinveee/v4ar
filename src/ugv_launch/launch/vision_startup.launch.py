@@ -82,11 +82,6 @@ def generate_launch_description():
         use_rover_detector_arg
     ])
 
-    # ------------------------------------------------------------
-    # Set ROS_DOMAIN_ID
-    ld.add_action(SetEnvironmentVariable('ROS_DOMAIN_ID', '7'))
-    ld.add_action(LogInfo(msg="ROS_DOMAIN_ID = 7"))
-
     # Environment variables (only when GUI enabled)
     # ------------------------------------------------------------
     ld.add_action(SetEnvironmentVariable(
