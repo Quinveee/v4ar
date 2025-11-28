@@ -3,23 +3,25 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool
-from perception_msgs.msg import ObjectPoseArray  # adjust if your obstacle msg differs
+from perception_msgs.msg import ObjectPoseArray
 import numpy as np
 import networkx as nx
-import math, time
-
+import time
 
 # ==============================================================
-# Configuration
+# Configuration Constants
 # ==============================================================
-FIELD_X = 6.0       # meters
-FIELD_Y = 9.0       # meters
-GRID_RES = 0.3      # grid resolution (meters)
+FIELD_X = 6.0       # Field width (m)
+FIELD_Y = 9.0       # Field height (m)
+GRID_RES = 0.3      # Grid cell size (m)
 
 NX = int(FIELD_X / GRID_RES)
 NY = int(FIELD_Y / GRID_RES)
 
 
+# ==============================================================
+# Utility Functions
+# ==============================================================
 def world_to_grid(x: float, y: float):
     """Convert world coordinates (m) to grid indices (i, j)."""
     i = int(np.clip(x / GRID_RES, 0, NX - 1))
@@ -41,16 +43,18 @@ class PathPlannerNode(Node):
     def __init__(self):
         super().__init__("path_planner_node")
 
-        # Parameters
+        # ---------------- Parameters ----------------
         self.declare_parameter("waypoint_tolerance", 0.1)
         self.declare_parameter("localization_pause", 1.5)
         self.declare_parameter("replan_interval", 2.0)
+        self.declare_parameter("replan_on_local_goal", True)
 
         self.waypoint_tolerance = self.get_parameter("waypoint_tolerance").value
         self.localization_pause = self.get_parameter("localization_pause").value
         self.replan_interval = self.get_parameter("replan_interval").value
+        self.replan_on_local_goal = self.get_parameter("replan_on_local_goal").value
 
-        # ROS I/O
+        # ---------------- ROS I/O ----------------
         self.create_subscription(PoseStamped, "/robot_pose", self.pose_callback, 10)
         self.create_subscription(PoseStamped, "/goal_pose", self.goal_callback, 10)
         self.create_subscription(ObjectPoseArray, "/detected_rovers", self.obstacle_callback, 10)
@@ -58,7 +62,7 @@ class PathPlannerNode(Node):
         self.local_goal_pub = self.create_publisher(PoseStamped, "/local_goal", 10)
         self.goal_reached_pub = self.create_publisher(Bool, "/goal_reached", 10)
 
-        # Internal state
+        # ---------------- Internal State ----------------
         self.robot_pose = None
         self.goal_pose = None
         self.obstacles = set()
@@ -68,10 +72,12 @@ class PathPlannerNode(Node):
         self.localization_start_time = None
         self.last_plan_time = 0.0
 
-        # Timer (20 Hz)
-        self.create_timer(0.05, self.update_loop)
+        # ---------------- Main Timer ----------------
+        self.create_timer(0.05, self.update_loop)  # 20 Hz
 
-        self.get_logger().info("PathPlannerNode initialized.")
+        self.get_logger().info(
+            f"PathPlannerNode initialized | Grid: {NX}x{NY} | Resolution: {GRID_RES:.2f} m"
+        )
 
     # ------------------------------------------------------------
     # ROS Callbacks
@@ -81,7 +87,7 @@ class PathPlannerNode(Node):
 
     def goal_callback(self, msg: PoseStamped):
         self.goal_pose = msg.pose
-        self.get_logger().info("New goal received — planning path.")
+        self.get_logger().info("🎯 New global goal received — computing path.")
         self.compute_path()
 
     def obstacle_callback(self, msg: ObjectPoseArray):
@@ -118,9 +124,11 @@ class PathPlannerNode(Node):
             self.path = path
             self.current_idx = 0
             self.state = "NAVIGATING"
-            self.get_logger().info(f"Path planned with {len(path)} waypoints.")
+            self.get_logger().info(
+                f"🧭 New path planned with {len(path)} waypoints | Start: {start} | Goal: {goal}"
+            )
         except nx.NetworkXNoPath:
-            self.get_logger().warn("No path found to goal.")
+            self.get_logger().warn("🚫 No path found to goal.")
             self.path = []
             self.state = "IDLE"
 
@@ -133,7 +141,7 @@ class PathPlannerNode(Node):
 
         now = time.time()
 
-        # Replan periodically (optional)
+        # Periodic replanning
         if now - self.last_plan_time > self.replan_interval and self.state not in ("LOCALIZING", "DONE"):
             self.compute_path()
             self.last_plan_time = now
@@ -148,9 +156,6 @@ class PathPlannerNode(Node):
             if time.time() - self.localization_start_time > self.localization_pause:
                 self.advance_waypoint()
 
-        elif self.state == "DONE":
-            pass  # Goal reached, nothing to do
-
     # ------------------------------------------------------------
     # Navigation Step
     # ------------------------------------------------------------
@@ -162,11 +167,20 @@ class PathPlannerNode(Node):
 
         target_i, target_j = self.path[self.current_idx]
         x_goal, y_goal = grid_to_world(target_i, target_j)
-        robot_i, robot_j = world_to_grid(self.robot_pose.position.x, self.robot_pose.position.y)
+        robot_x, robot_y = self.robot_pose.position.x, self.robot_pose.position.y
+        robot_i, robot_j = world_to_grid(robot_x, robot_y)
 
-        # Check if in target bin
+        # Log current robot position and local goal
+        self.get_logger().info(
+            f"📍 Robot: world=({robot_x:.2f}, {robot_y:.2f}) grid=({robot_i}, {robot_j}) | "
+            f"Target: world=({x_goal:.2f}, {y_goal:.2f}) grid=({target_i}, {target_j})"
+        )
+
+        # Check if robot entered current target bin
         if (robot_i, robot_j) == (target_i, target_j):
-            self.get_logger().info(f"🕹️ Entered cell {target_i, target_j} → localizing.")
+            self.get_logger().info(
+                f"✅ Entered local goal cell ({target_i}, {target_j}) → switching to LOCALIZING."
+            )
             self.state = "LOCALIZING"
             self.localization_start_time = time.time()
             return
@@ -184,15 +198,28 @@ class PathPlannerNode(Node):
     # Waypoint progression
     # ------------------------------------------------------------
     def advance_waypoint(self):
-        """Move to the next waypoint or finish."""
+        """Move to the next waypoint or finish the plan."""
         self.current_idx += 1
         if self.current_idx >= len(self.path):
             self.finish_goal()
-        else:
-            self.state = "NAVIGATING"
-            next_i, next_j = self.path[self.current_idx]
-            self.get_logger().info(f"➡️ Proceeding to waypoint {next_i, next_j}.")
+            return
 
+        next_i, next_j = self.path[self.current_idx]
+        x_next, y_next = grid_to_world(next_i, next_j)
+
+        if self.replan_on_local_goal:
+            self.get_logger().info("♻️ Replanning after localization refinement.")
+            self.compute_path()
+        else:
+            self.get_logger().info(
+                f"➡️ Proceeding to next waypoint: grid=({next_i}, {next_j}) world=({x_next:.2f}, {y_next:.2f})"
+            )
+
+        self.state = "NAVIGATING"
+
+    # ------------------------------------------------------------
+    # Goal Completion
+    # ------------------------------------------------------------
     def finish_goal(self):
         """Publish goal reached event."""
         self.state = "DONE"
@@ -200,7 +227,8 @@ class PathPlannerNode(Node):
         msg = Bool()
         msg.data = True
         self.goal_reached_pub.publish(msg)
-        self.get_logger().info("🏁 Goal reached! Navigation complete.")
+        self.get_logger().info("🏁 GLOBAL GOAL REACHED — navigation complete!")
+
 
 # ==============================================================
 # Main Entry Point

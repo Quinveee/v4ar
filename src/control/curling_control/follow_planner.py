@@ -154,7 +154,7 @@ class NavigationWithAvoidanceNode(Node):
             self.heading_pub.publish(heading_vec)
 
         if goal_reached:
-            self.get_logger().info("✅ Local goal reached.", throttle_duration_sec=1.0)
+            self.get_logger().info("Local goal reached.", throttle_duration_sec=1.0)
 
     # -------------------------------------------------------------------
     # Cleanup
