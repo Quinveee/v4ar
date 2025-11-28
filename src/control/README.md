@@ -71,8 +71,6 @@ ros2 run visualizations control_visualization --ros-args \
 - `use_odometry_update` (bool, default: true): Update position estimate using cmd_vel
 - `update_rate` (float, default: 20.0): Control loop frequency (Hz)
 - `pose_topic` (string, default: "/odom_pose_processed"): Topic for current robot pose
-- `max_linear_velocity_driving` (float, default: 0.2): Maximum linear velocity during driving phase after orientation (m/s)
-- `max_angular_velocity` (float, default: 1.0): Maximum angular velocity for rotation (rad/s)
 
 ### Visualization Node (`control_visualization`)
 
