@@ -6,8 +6,7 @@ from launch.actions import (
     LogInfo,
     IncludeLaunchDescription,
     GroupAction,
-    SetEnvironmentVariable,
-    ExecuteProcess
+    SetEnvironmentVariable
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
@@ -52,6 +51,11 @@ def generate_launch_description():
         default_value="false",
         description="Display field visualization"
     )
+    strategy_arg = DeclareLaunchArgument(
+        "strategy",
+        default_value="identity",
+        description="Localization strategy type"
+    )
 
     gui = LaunchConfiguration("use_gui")
     tilt = LaunchConfiguration("use_tilt")
@@ -59,6 +63,7 @@ def generate_launch_description():
     markers_only = LaunchConfiguration("use_markers_only")
     localization_only = LaunchConfiguration("use_localization_only")
     display_field = LaunchConfiguration("use_display_field")
+    strategy = LaunchConfiguration("strategy")
 
     ld = LaunchDescription([
         use_gui_arg,
@@ -66,31 +71,14 @@ def generate_launch_description():
         use_cameras_only_arg,
         use_markers_only_arg,
         use_localization_only_arg,
-        use_display_field_arg
+        use_display_field_arg,
+        strategy_arg
     ])
 
     # ------------------------------------------------------------
     # Set ROS_DOMAIN_ID
-    ld.add_action(SetEnvironmentVariable('ROS_DOMAIN_ID', '13'))
-    ld.add_action(LogInfo(msg="ROS_DOMAIN_ID = 13"))
-
-    # Start ugv_bringup
-    # ld.add_action(ExecuteProcess(
-    #     cmd=['ros2', 'run', 'ugv_bringup', 'ugv_bringup'],
-    #     output='screen'
-    # ))
-
-    # Start ugv_driver
-    # ld.add_action(ExecuteProcess(
-    #     cmd=['ros2', 'run', 'ugv_bringup', 'ugv_driver'],
-    #     output='screen'
-    # ))
-
-    # Start camera.launch.py
-    # ld.add_action(ExecuteProcess(
-    #     cmd=['ros2', 'launch', 'ugv_vision', 'camera.launch.py'],
-    #     output='screen'
-    # ))
+    ld.add_action(SetEnvironmentVariable('ROS_DOMAIN_ID', '7'))
+    ld.add_action(LogInfo(msg="ROS_DOMAIN_ID = 7"))
 
     # Environment variables (only when GUI enabled)
     # ------------------------------------------------------------
@@ -153,11 +141,8 @@ def generate_launch_description():
         executable='img',
         name='image_tools_img',
         output='screen',
-        parameters=[{
-            'custom_rect': True,
-            'topic': '/image_raw',
-            'frame_rate': 5
-        }]
+        arguments=['--custom_rect', '--topic',
+                   '/image_raw', '--frame-rate', '5']
     )
 
     apriltag_vis = Node(
@@ -184,7 +169,7 @@ def generate_launch_description():
         executable='localization',
         name='localization',
         output='screen',
-        parameters=[{'strategy_type': 'kalman'}]
+        parameters=[{'strategy_type': strategy}]
     )
 
     oak_detector = Node(

@@ -23,6 +23,7 @@ from .navigation_strategies import (
     IntegratedYawDirectGoalStrategy,
     # ViewpointStrategy,
     GridDirectGoalStrategy,
+    GridDirectGoalStrategyObstacle,
 )
 
 # Registry of available strategies
@@ -34,6 +35,7 @@ AVAILABLE_STRATEGIES = {
     "dwa": DWAStrategy,
     # "viewpoint": ViewpointStrategy,
     "discretized": GridDirectGoalStrategy,
+    "discretized_obstacle": GridDirectGoalStrategyObstacle,
 }
 
 
@@ -83,8 +85,17 @@ class NavigationWithAvoidanceNode(Node):
         self.declare_parameter("grid_dwell_time", 0.0)
         # (Optional) could add grid_resolution, inflation_radius here if you want to expose them
 
-        # Get parameter values
-        strategy_type = self.get_parameter("strategy_type").value
+        # Get parameter values (normalize and accept common aliases)
+        raw_strategy = self.get_parameter("strategy_type").value
+        # Normalize: lowercase, strip whitespace, replace hyphens with underscores
+        strategy_type = str(raw_strategy).strip().lower().replace("-", "_")
+
+        # Accept some common aliases / variants
+        if strategy_type.replace(" ", "") == "discretizedobstacle":
+            strategy_type = "discretized_obstacle"
+        # If user passed variants like 'discretized-obstacle' or 'discretized obstacle'
+        if strategy_type.startswith("discretized") and "obst" in strategy_type:
+            strategy_type = "discretized_obstacle"
 
         # Initialize or create strategy
         if strategy is None:
@@ -115,6 +126,16 @@ class NavigationWithAvoidanceNode(Node):
                     dwell_time_at_waypoint=grid_dwell_time,
                     # control_dt matches our timer below
                     control_dt=0.05,
+                )
+            elif strategy_type == "discretized_obstacle":
+                # Obstacle-aware grid strategy: pass inflation radius (use safe_distance)
+                self.strategy = strategy_class(
+                    goal_tolerance=goal_tolerance,
+                    max_linear_velocity=max_linear_velocity,
+                    angular_gain=angular_gain,
+                    dwell_time_at_waypoint=grid_dwell_time,
+                    control_dt=0.05,
+                    obstacle_inflation_radius=safe_distance,
                 )
             else:
                 # All other strategies: old signature with avoidance parameters

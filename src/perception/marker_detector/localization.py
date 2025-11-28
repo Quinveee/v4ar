@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import argparse
 import numpy as np
 from collections import deque
 import rclpy
@@ -47,7 +48,8 @@ class LocalizationNode(Node):
         strategy_type = self.get_parameter("strategy_type").value
         Strategy = STRATEGIES.get(strategy_type, IdentityLocalization)
         self.localizer = Strategy()
-        self.get_logger().info(f"Using localization strategy: {Strategy.__name__}")
+        self.get_logger().info(
+            f"Using localization strategy: {Strategy.__name__}")
 
         # --- Internal state ---
         self.v = 0.0
@@ -55,21 +57,25 @@ class LocalizationNode(Node):
         self.last_update_time = None
 
         # Stationary detection & buffer
-        self.pose_buffer = deque(maxlen=self.get_parameter("buffer_size").value)
+        self.pose_buffer = deque(
+            maxlen=self.get_parameter("buffer_size").value)
         self.stationary_counter = 0
-        self.stationary_threshold = self.get_parameter("stationary_threshold").value
+        self.stationary_threshold = self.get_parameter(
+            "stationary_threshold").value
         self.v_thresh = 0.02
         self.w_thresh = 0.02
 
         # Exponential smoothing
-        self.enable_smoothing = self.get_parameter("enable_exponential_smoothing").value
+        self.enable_smoothing = self.get_parameter(
+            "enable_exponential_smoothing").value
         self.alpha = self.get_parameter("smoothing_alpha").value
         self.prev_smoothed_pose = None  # (x, y, yaw)
 
         # --- ROS setup ---
         self.pose_pub = self.create_publisher(PoseStamped, "/robot_pose", 10)
         self.create_subscription(Twist, "/cmd_vel", self.cmd_callback, 10)
-        self.create_subscription(PoseStamped, "/robot_pose_raw", self.pose_callback, 10)
+        self.create_subscription(
+            PoseStamped, "/robot_pose_raw", self.pose_callback, 10)
 
         rate = self.get_parameter("publish_rate").value
         self.create_timer(1.0 / rate, self.timer_callback)
@@ -94,7 +100,8 @@ class LocalizationNode(Node):
         y_s = alpha * y + (1 - alpha) * prev_y
 
         # Smooth yaw using circular interpolation
-        delta_yaw = math.atan2(math.sin(yaw - prev_yaw), math.cos(yaw - prev_yaw))
+        delta_yaw = math.atan2(math.sin(yaw - prev_yaw),
+                               math.cos(yaw - prev_yaw))
         yaw_s = prev_yaw + alpha * delta_yaw
         yaw_s = math.atan2(math.sin(yaw_s), math.cos(yaw_s))
 
@@ -112,7 +119,8 @@ class LocalizationNode(Node):
         stationary = self.is_stationary()
 
         if stationary:
-            self.stationary_counter = min(self.stationary_counter + 1, self.stationary_threshold)
+            self.stationary_counter = min(
+                self.stationary_counter + 1, self.stationary_threshold)
         else:
             self.stationary_counter = max(self.stationary_counter - 1, 0)
             self.pose_buffer.clear()
@@ -121,12 +129,14 @@ class LocalizationNode(Node):
 
         # Stationary → buffer-based smoothing
         if self.stationary_counter >= self.stationary_threshold:
-            self.pose_buffer.append((msg.pose.position.x, msg.pose.position.y, yaw))
+            self.pose_buffer.append(
+                (msg.pose.position.x, msg.pose.position.y, yaw))
 
             if len(self.pose_buffer) > 1:
                 xs, ys, thetas = zip(*self.pose_buffer)
                 x, y = np.mean(xs), np.mean(ys)
-                yaw = math.atan2(np.mean(np.sin(thetas)), np.mean(np.cos(thetas)))
+                yaw = math.atan2(np.mean(np.sin(thetas)),
+                                 np.mean(np.cos(thetas)))
             else:
                 x, y = msg.pose.position.x, msg.pose.position.y
 
@@ -178,9 +188,12 @@ class LocalizationNode(Node):
 # ----------------------------------------------------------
 # Node entrypoint
 # ----------------------------------------------------------
+
+
 def main(args=None):
-    rclpy.init(args=args)
+    rclpy.init()
     node = LocalizationNode()
+
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
