@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export ROS_DOMAIN_ID=13
+export ROS_DOMAIN_ID=7
 echo "ROS_DOMAIN_ID = $ROS_DOMAIN_ID"
 
 # --- ugv_bringup ---

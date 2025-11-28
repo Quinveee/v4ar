@@ -44,6 +44,8 @@ setup(
             'nav2_strategy = curling_control.navigation_strategies.nav2_strategy:main',
             'dead_reckoning_odom = curling_control.navigation_strategies.dead_reckoning_odom:main',
             'control_node = control_node.control_node:main',
+            'planner = curling_control.follow_planner:main',
+            'follow_planner = curling_control.follow_planner:main'
         ],
     },
 )

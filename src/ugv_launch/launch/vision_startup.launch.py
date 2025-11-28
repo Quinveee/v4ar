@@ -134,40 +134,40 @@ def generate_launch_description():
     # ------------------------------------------------------------
     # OAK Camera: optional include
     # ------------------------------------------------------------
-    try:
-        ugv_share = get_package_share_directory('ugv_vision')
-        oak_launch = os.path.join(ugv_share, 'launch', 'oak_d_lite.launch.py')
+    # try:
+    #     ugv_share = get_package_share_directory('ugv_vision')
+    #     oak_launch = os.path.join(ugv_share, 'launch', 'oak_d_lite.launch.py')
 
-        if os.path.exists(oak_launch):
-            ld.add_action(LogInfo(msg=f"Including OAK launch: {oak_launch}"))
-            ld.add_action(
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(oak_launch))
-            )
-        else:
-            ld.add_action(
-                LogInfo(msg="ugv_vision found but no oak_d_lite.launch.py"))
-    except PackageNotFoundError:
-        ld.add_action(
-            LogInfo(msg="ugv_vision not found; skipping OAK include"))
+    #     if os.path.exists(oak_launch):
+    #         ld.add_action(LogInfo(msg=f"Including OAK launch: {oak_launch}"))
+    #         ld.add_action(
+    #             IncludeLaunchDescription(
+    #                 PythonLaunchDescriptionSource(oak_launch))
+    #         )
+    #     else:
+    #         ld.add_action(
+    #             LogInfo(msg="ugv_vision found but no oak_d_lite.launch.py"))
+    # except PackageNotFoundError:
+    #     ld.add_action(
+    #         LogInfo(msg="ugv_vision not found; skipping OAK include"))
 
-    try:
-        ugv_share = get_package_share_directory('ugv_bringup')
-        lidar_launch = os.path.join(
-            ugv_share, 'launch', 'bringup_lidar.launch.py')
-        if os.path.exists(lidar_launch):
-            ld.add_action(
-                LogInfo(msg=f"Including LIDAR launch: {lidar_launch}"))
-            ld.add_action(
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(lidar_launch))
-            )
-        else:
-            ld.add_action(
-                LogInfo(msg="ugv_bringup found but no bringup_lidar.launch.py"))
-    except PackageNotFoundError:
-        ld.add_action(
-            LogInfo(msg="ugv_bringup not found; skipping LIDAR include"))
+    # try:
+    #     ugv_share = get_package_share_directory('ugv_bringup')
+    #     lidar_launch = os.path.join(
+    #         ugv_share, 'launch', 'bringup_lidar.launch.py')
+    #     if os.path.exists(lidar_launch):
+    #         ld.add_action(
+    #             LogInfo(msg=f"Including LIDAR launch: {lidar_launch}"))
+    #         ld.add_action(
+    #             IncludeLaunchDescription(
+    #                 PythonLaunchDescriptionSource(lidar_launch))
+    #         )
+    #     else:
+    #         ld.add_action(
+    #             LogInfo(msg="ugv_bringup found but no bringup_lidar.launch.py"))
+    # except PackageNotFoundError:
+    #     ld.add_action(
+    #         LogInfo(msg="ugv_bringup not found; skipping LIDAR include"))
 
     # ------------------------------------------------------------
     # Nodes (shared definitions)

@@ -3,12 +3,14 @@
 Launch file for Nav2 navigation with obstacle detector.
 
 Launches:
-- Nav2 stack (bt_navigator, planner_server, controller_server with embedded costmaps)
+- Nav2 stack (controller_server, planner_server with embedded costmaps)
 - RF2O laser odometry or dead reckoning
 - Obstacle detector
 - Optional: Nav2 strategy node
 - Optional: Visualization
 - Static TF transforms
+
+Nav2 uses BOTH laser scan AND depth camera for obstacle detection.
 """
 
 from launch import LaunchDescription
@@ -70,6 +72,10 @@ def generate_launch_description():
     
     # Robot frame parameters
     publish_static_tf = LaunchConfiguration('publish_static_tf', default='false')
+    
+    # Depth camera parameters
+    use_depth_camera = LaunchConfiguration('use_depth_camera', default='false')
+    depth_camera_topic = LaunchConfiguration('depth_camera_topic', default='/oak/stereo/image_raw')
     
     # ============================================================================
     # Nav2 Parameters Configuration
@@ -154,7 +160,7 @@ def generate_launch_description():
                     'obstacle_layer': {
                         'plugin': 'nav2_costmap_2d::ObstacleLayer',
                         'enabled': True,
-                        'observation_sources': 'scan',
+                        'observation_sources': 'scan',  # Only laser by default
                         'scan': {
                             'topic': '/scan',
                             'max_obstacle_height': 2.0,
@@ -185,7 +191,7 @@ def generate_launch_description():
         'GridBased': {
             'plugin': 'nav2_navfn_planner/NavfnPlanner',
             'tolerance': 0.5,
-            'use_astar': False,  # False = Dijkstra, True = A*
+            'use_astar': False,
             'allow_unknown': True,
         },
         # Global costmap embedded in planner (sub-node)
@@ -198,10 +204,10 @@ def generate_launch_description():
                     'update_frequency': 1.0,
                     'publish_frequency': 1.0,
                     'rolling_window': False,
-                    'width': 10,
-                    'height': 10,
-                    'origin_x': -5.0,
-                    'origin_y': -5.0,
+                    'width': 20,
+                    'height': 20,
+                    'origin_x': -10.0,
+                    'origin_y': -10.0,
                     'resolution': 0.05,
                     'robot_radius': 0.15,
                     'track_unknown_space': True,
@@ -209,7 +215,7 @@ def generate_launch_description():
                     'obstacle_layer': {
                         'plugin': 'nav2_costmap_2d::ObstacleLayer',
                         'enabled': True,
-                        'observation_sources': 'scan',
+                        'observation_sources': 'scan',  # Only laser by default
                         'scan': {
                             'topic': '/scan',
                             'max_obstacle_height': 2.0,
@@ -232,70 +238,11 @@ def generate_launch_description():
         }
     }
     
-    # BT Navigator parameters
-    bt_navigator_params = {
-        'use_sim_time': use_sim_time,
-        'global_frame': 'map',
-        'robot_base_frame': 'base_footprint',
-        'odom_topic': '/odom',
-        'bt_loop_duration': 10,
-        'default_server_timeout': 20,
-        'enable_groot_monitoring': False,
-        'groot_zmq_publisher_port': 1666,
-        'groot_zmq_server_port': 1667,
-        'plugin_lib_names': [
-            'nav2_compute_path_to_pose_action_bt_node',
-            'nav2_compute_path_through_poses_action_bt_node',
-            'nav2_smooth_path_action_bt_node',
-            'nav2_follow_path_action_bt_node',
-            'nav2_spin_action_bt_node',
-            'nav2_wait_action_bt_node',
-            'nav2_back_up_action_bt_node',
-            'nav2_drive_on_heading_bt_node',
-            'nav2_clear_costmap_service_bt_node',
-            'nav2_is_stuck_condition_bt_node',
-            'nav2_goal_reached_condition_bt_node',
-            'nav2_goal_updated_condition_bt_node',
-            'nav2_globally_updated_goal_condition_bt_node',
-            'nav2_is_path_valid_condition_bt_node',
-            'nav2_initial_pose_received_condition_bt_node',
-            'nav2_reinitialize_global_localization_service_bt_node',
-            'nav2_rate_controller_bt_node',
-            'nav2_distance_controller_bt_node',
-            'nav2_speed_controller_bt_node',
-            'nav2_truncate_path_action_bt_node',
-            'nav2_truncate_path_local_action_bt_node',
-            'nav2_goal_updater_node_bt_node',
-            'nav2_recovery_node_bt_node',
-            'nav2_pipeline_sequence_bt_node',
-            'nav2_round_robin_node_bt_node',
-            'nav2_transform_available_condition_bt_node',
-            'nav2_time_expired_condition_bt_node',
-            'nav2_path_expiring_timer_condition',
-            'nav2_distance_traveled_condition_bt_node',
-            'nav2_single_trigger_bt_node',
-            'nav2_is_battery_low_condition_bt_node',
-            'nav2_navigate_through_poses_action_bt_node',
-            'nav2_navigate_to_pose_action_bt_node',
-            'nav2_remove_passed_goals_action_bt_node',
-            'nav2_planner_selector_bt_node',
-            'nav2_controller_selector_bt_node',
-            'nav2_goal_checker_selector_bt_node',
-            'nav2_controller_cancel_bt_node',
-            'nav2_path_longer_on_approach_bt_node',
-            'nav2_wait_cancel_bt_node',
-            'nav2_spin_cancel_bt_node',
-            'nav2_back_up_cancel_bt_node',
-            'nav2_drive_on_heading_cancel_bt_node',
-        ],
-    }
-    
     # ============================================================================
     # Node Definitions
     # ============================================================================
     
     # Static transform: map → odom (identity transform)
-    # Required by Nav2 since we don't have a separate localization system
     static_tf_map_to_odom = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -304,7 +251,6 @@ def generate_launch_description():
     )
     
     # RF2O Laser Odometry node
-    # Generates odometry from laser scan motion (odom → base_footprint)
     rf2o_odometry = Node(
         package='rf2o_laser_odometry',
         executable='rf2o_laser_odometry_node',
@@ -324,7 +270,6 @@ def generate_launch_description():
     )
     
     # Dead Reckoning Odometry node
-    # Integrates cmd_vel to estimate odometry (odom → base_footprint)
     dead_reckoning_odometry = Node(
         package='control',
         executable='dead_reckoning_odom',
@@ -344,8 +289,6 @@ def generate_launch_description():
     )
     
     # Nav2 Controller Server
-    # Creates local_costmap internally as sub-node
-    # Follows planned paths using DWB local planner
     nav2_controller = Node(
         package='nav2_controller',
         executable='controller_server',
@@ -355,8 +298,6 @@ def generate_launch_description():
     )
     
     # Nav2 Planner Server
-    # Creates global_costmap internally as sub-node
-    # Plans paths from start to goal using NavFn (Dijkstra)
     nav2_planner = Node(
         package='nav2_planner',
         executable='planner_server',
@@ -365,19 +306,8 @@ def generate_launch_description():
         parameters=[planner_params],
     )
     
-    # Nav2 BT Navigator
-    # Coordinates planning and control using behavior trees
-    nav2_bt_navigator = Node(
-        package='nav2_bt_navigator',
-        executable='bt_navigator',
-        name='bt_navigator',
-        output='screen',
-        parameters=[bt_navigator_params],
-    )
-    
     # Nav2 Lifecycle Manager
-    # Manages lifecycle of Nav2 nodes (configure, activate, etc.)
-    # NOTE: Does NOT manage costmap nodes - they're internal to controller/planner
+    # BT Navigator removed - only managing controller and planner
     nav2_lifecycle = Node(
         package='nav2_lifecycle_manager',
         executable='lifecycle_manager',
@@ -389,13 +319,11 @@ def generate_launch_description():
             'node_names': [
                 'controller_server',
                 'planner_server',
-                'bt_navigator',
             ]
         }],
     )
     
     # Obstacle detector node
-    # Detects other rovers using camera + depth
     obstacle_detector_node = Node(
         package='perception',
         executable='rover_detector_with_pose',
@@ -410,7 +338,6 @@ def generate_launch_description():
     )
     
     # Nav2 strategy node (optional)
-    # Sends navigation goals to Nav2 and monitors progress
     nav2_strategy = Node(
         package='control',
         executable='nav2_strategy',
@@ -429,7 +356,6 @@ def generate_launch_description():
     )
     
     # Control visualization node (optional)
-    # Visualizes robot pose, goal, and field
     control_visualization = Node(
         package='visualizations',
         executable='control_visualization',
@@ -557,6 +483,12 @@ def generate_launch_description():
         DeclareLaunchArgument('publish_static_tf', default_value='false',
                              description='Publish static transforms for robot structure'),
         
+        # Depth camera parameters (for future use)
+        DeclareLaunchArgument('use_depth_camera', default_value='false',
+                             description='Add depth camera to costmap observation sources'),
+        DeclareLaunchArgument('depth_camera_topic', default_value='/oak/stereo/image_raw',
+                             description='Depth camera topic (must be PointCloud2)'),
+        
         # ========================================================================
         # Nodes (in launch order)
         # ========================================================================
@@ -572,12 +504,11 @@ def generate_launch_description():
         rf2o_odometry,
         dead_reckoning_odometry,
         
-        # 4. Nav2 core nodes
+        # 4. Nav2 core nodes (BT Navigator removed)
         nav2_controller,
         nav2_planner,
-        nav2_bt_navigator,
         
-        # 5. Nav2 lifecycle manager (starts Nav2 nodes)
+        # 5. Nav2 lifecycle manager (only manages controller and planner)
         nav2_lifecycle,
         
         # 6. Perception (obstacle detector)
