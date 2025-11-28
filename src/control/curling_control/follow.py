@@ -18,7 +18,8 @@ from .navigation_strategies import (
     DirectGoalStrategy,
     DWAStrategy,
     IntegratedYawDirectGoalStrategy,
-    ViewpointStrategy,
+    # ViewpointStrategy,
+    GridDirectGoalStrategy
 )
 
 # Registry of available strategies
@@ -28,7 +29,8 @@ AVAILABLE_STRATEGIES = {
     "integrated_yaw_direct_goal": IntegratedYawDirectGoalStrategy,
     "direct_goal_integrated_yaw": IntegratedYawDirectGoalStrategy,
     "dwa": DWAStrategy,
-    "viewpoint": ViewpointStrategy,
+    # "viewpoint": ViewpointStrategy,
+    "discretized": GridDirectGoalStrategy
 }
 
 
