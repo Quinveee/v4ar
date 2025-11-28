@@ -6,8 +6,7 @@ from launch.actions import (
     LogInfo,
     IncludeLaunchDescription,
     GroupAction,
-    SetEnvironmentVariable,
-    ExecuteProcess
+    SetEnvironmentVariable
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
@@ -74,48 +73,6 @@ def generate_launch_description():
     ld.add_action(SetEnvironmentVariable('ROS_DOMAIN_ID', '7'))
     ld.add_action(LogInfo(msg="ROS_DOMAIN_ID = 7"))
 
-    # # Kill any existing ugv_bringup processes
-    # ld.add_action(ExecuteProcess(
-    #     cmd="pkill -f 'ros2 run ugv_bringup ugv_bringup' || true",
-    #     output='screen',
-    #     shell=True
-    # ))
-
-    # # Start ugv_bringup
-    # ld.add_action(ExecuteProcess(
-    #     cmd=['ros2', 'run', 'ugv_bringup', 'ugv_bringup'],
-    #     output='screen',
-    #     on_exit=LogInfo(msg="ugv_bringup exited")
-    # ))
-
-    # # Kill any existing ugv_driver processes
-    # ld.add_action(ExecuteProcess(
-    #     cmd="pkill -f 'ros2 run ugv_bringup ugv_driver' || true",
-    #     output='screen',
-    #     shell=True
-    # ))
-
-    # # Start ugv_driver
-    # ld.add_action(ExecuteProcess(
-    #     cmd=['ros2', 'run', 'ugv_bringup', 'ugv_driver'],
-    #     output='screen',
-    #     on_exit=LogInfo(msg="ugv_driver exited")
-    # ))
-
-    # # Kill any existing camera.launch.py processes
-    # ld.add_action(ExecuteProcess(
-    #     cmd="pkill -f 'ros2 launch ugv_vision camera.launch.py' || true",
-    #     output='screen',
-    #     shell=True
-    # ))
-
-    # # Start camera.launch.py
-    # ld.add_action(ExecuteProcess(
-    #     cmd=['ros2', 'launch', 'ugv_vision', 'camera.launch.py'],
-    #     output='screen',
-    #     on_exit=LogInfo(msg="camera.launch.py exited")
-    # ))
-
     # Environment variables (only when GUI enabled)
     # ------------------------------------------------------------
     ld.add_action(SetEnvironmentVariable(
@@ -177,8 +134,10 @@ def generate_launch_description():
         executable='img',
         name='image_tools_img',
         output='screen',
-        arguments=['--custom_rect', '--topic',
-                   '/image_raw', '--frame-rate', '5']
+        # arguments=['--custom_rect', '--topic',
+        #            '/image_raw', '--frame-rate', '5']
+        parameters=[{'custom_rect': True,
+                     'topic': '/image_raw', 'frame_rate': 5}]
     )
 
     apriltag_vis = Node(

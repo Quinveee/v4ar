@@ -105,7 +105,7 @@ class PathPlannerNode(Node):
     # ------------------------------------------------------------
     def compute_path(self):
         if self.robot_pose is None or self.goal_pose is None:
-            self.get_logger().warn("Cannot compute path — pose or goal missing.")
+            self.get_logger().warn("⚠️ Cannot compute path — pose or goal missing.")
             return
 
         start = world_to_grid(self.robot_pose.position.x, self.robot_pose.position.y)
@@ -125,10 +125,10 @@ class PathPlannerNode(Node):
             self.current_idx = 0
             self.state = "NAVIGATING"
             self.get_logger().info(
-                f"🧭 New path planned with {len(path)} waypoints | Start: {start} | Goal: {goal}"
+                f"New path planned with {len(path)} waypoints | Start: {start} | Goal: {goal}"
             )
         except nx.NetworkXNoPath:
-            self.get_logger().warn("🚫 No path found to goal.")
+            self.get_logger().warn("No path found to goal.")
             self.path = []
             self.state = "IDLE"
 
@@ -208,11 +208,11 @@ class PathPlannerNode(Node):
         x_next, y_next = grid_to_world(next_i, next_j)
 
         if self.replan_on_local_goal:
-            self.get_logger().info("♻️ Replanning after localization refinement.")
+            self.get_logger().info("Replanning after localization refinement.")
             self.compute_path()
         else:
             self.get_logger().info(
-                f"➡️ Proceeding to next waypoint: grid=({next_i}, {next_j}) world=({x_next:.2f}, {y_next:.2f})"
+                f"Proceeding to next waypoint: grid=({next_i}, {next_j}) world=({x_next:.2f}, {y_next:.2f})"
             )
 
         self.state = "NAVIGATING"
@@ -227,7 +227,7 @@ class PathPlannerNode(Node):
         msg = Bool()
         msg.data = True
         self.goal_reached_pub.publish(msg)
-        self.get_logger().info("🏁 GLOBAL GOAL REACHED — navigation complete!")
+        self.get_logger().info("GLOBAL GOAL REACHED — navigation complete!")
 
 
 # ==============================================================

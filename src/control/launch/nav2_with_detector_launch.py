@@ -10,7 +10,8 @@ Launches:
 - Optional: Visualization
 - Static TF transforms
 
-Nav2 uses BOTH laser scan AND depth camera for obstacle detection.
+Nav2 uses laser scan for obstacle detection.
+TF tree: map → base_footprint → base_link (RF2O publishes map→base_footprint)
 """
 
 from launch import LaunchDescription
@@ -58,13 +59,11 @@ def generate_launch_description():
     rf2o_laser_scan_topic = LaunchConfiguration('rf2o_laser_scan_topic', default='/scan')
     rf2o_odom_topic = LaunchConfiguration('rf2o_odom_topic', default='/odom')
     rf2o_base_frame = LaunchConfiguration('rf2o_base_frame', default='base_footprint')
-    rf2o_odom_frame = LaunchConfiguration('rf2o_odom_frame', default='odom')
     
     # Dead reckoning odometry parameters
     dead_reckoning_odom_topic = LaunchConfiguration('dead_reckoning_odom_topic', default='/odom')
     dead_reckoning_cmd_vel_topic = LaunchConfiguration('dead_reckoning_cmd_vel_topic', default='/cmd_vel')
     dead_reckoning_base_frame = LaunchConfiguration('dead_reckoning_base_frame', default='base_footprint')
-    dead_reckoning_odom_frame = LaunchConfiguration('dead_reckoning_odom_frame', default='odom')
     dead_reckoning_publish_tf = LaunchConfiguration('dead_reckoning_publish_tf', default='true')
     
     # Visualization parameters
@@ -72,10 +71,6 @@ def generate_launch_description():
     
     # Robot frame parameters
     publish_static_tf = LaunchConfiguration('publish_static_tf', default='false')
-    
-    # Depth camera parameters
-    use_depth_camera = LaunchConfiguration('use_depth_camera', default='false')
-    depth_camera_topic = LaunchConfiguration('depth_camera_topic', default='/oak/stereo/image_raw')
     
     # ============================================================================
     # Nav2 Parameters Configuration
@@ -147,7 +142,7 @@ def generate_launch_description():
             'local_costmap': {
                 'ros__parameters': {
                     'use_sim_time': use_sim_time,
-                    'global_frame': 'odom',
+                    'global_frame': 'map',  # Uses map frame
                     'robot_base_frame': 'base_footprint',
                     'update_frequency': 5.0,
                     'publish_frequency': 2.0,
@@ -160,7 +155,7 @@ def generate_launch_description():
                     'obstacle_layer': {
                         'plugin': 'nav2_costmap_2d::ObstacleLayer',
                         'enabled': True,
-                        'observation_sources': 'scan',  # Only laser by default
+                        'observation_sources': 'scan',
                         'scan': {
                             'topic': '/scan',
                             'max_obstacle_height': 2.0,
@@ -199,7 +194,7 @@ def generate_launch_description():
             'global_costmap': {
                 'ros__parameters': {
                     'use_sim_time': use_sim_time,
-                    'global_frame': 'map',
+                    'global_frame': 'map',  # Uses map frame
                     'robot_base_frame': 'base_footprint',
                     'update_frequency': 1.0,
                     'publish_frequency': 1.0,
@@ -215,7 +210,7 @@ def generate_launch_description():
                     'obstacle_layer': {
                         'plugin': 'nav2_costmap_2d::ObstacleLayer',
                         'enabled': True,
-                        'observation_sources': 'scan',  # Only laser by default
+                        'observation_sources': 'scan',
                         'scan': {
                             'topic': '/scan',
                             'max_obstacle_height': 2.0,
@@ -242,15 +237,21 @@ def generate_launch_description():
     # Node Definitions
     # ============================================================================
     
-    # Static transform: map → odom (identity transform)
-    static_tf_map_to_odom = Node(
+    # REMOVED: static_tf_map_to_odom (was causing disconnected TF tree)
+    # RF2O now publishes map→base_footprint directly
+    
+    # Static transform base_footprint → base_link
+    # Nav2 internally looks for base_link even though costmaps use base_footprint
+    static_tf_base_footprint_to_base_link = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='map_to_odom_tf',
-        arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom']
+        name='base_footprint_to_base_link_tf',
+        arguments=['0', '0', '0', '0', '0', '0', 'base_footprint', 'base_link']
     )
     
     # RF2O Laser Odometry node
+    # CRITICAL FIX: odom_frame_id changed to 'map' to create proper TF tree
+    # Creates: map → base_footprint
     rf2o_odometry = Node(
         package='rf2o_laser_odometry',
         executable='rf2o_laser_odometry_node',
@@ -260,7 +261,7 @@ def generate_launch_description():
             'laser_scan_topic': rf2o_laser_scan_topic,
             'odom_topic': rf2o_odom_topic,
             'base_frame_id': rf2o_base_frame,
-            'odom_frame_id': rf2o_odom_frame,
+            'odom_frame_id': 'map',  # CHANGED: Publish in map frame instead of odom
             'publish_tf': True,
             'freq': 20.0,
         }],
@@ -270,6 +271,7 @@ def generate_launch_description():
     )
     
     # Dead Reckoning Odometry node
+    # CRITICAL FIX: odom_frame_id changed to 'map'
     dead_reckoning_odometry = Node(
         package='control',
         executable='dead_reckoning_odom',
@@ -279,7 +281,7 @@ def generate_launch_description():
             'odom_topic': dead_reckoning_odom_topic,
             'cmd_vel_topic': dead_reckoning_cmd_vel_topic,
             'base_frame_id': dead_reckoning_base_frame,
-            'odom_frame_id': dead_reckoning_odom_frame,
+            'odom_frame_id': 'map',  # CHANGED: Publish in map frame instead of odom
             'publish_tf': dead_reckoning_publish_tf,
             'publish_rate': 50.0,
         }],
@@ -460,8 +462,6 @@ def generate_launch_description():
                              description='Output odometry topic from RF2O'),
         DeclareLaunchArgument('rf2o_base_frame', default_value='base_footprint',
                              description='Base frame ID for RF2O'),
-        DeclareLaunchArgument('rf2o_odom_frame', default_value='odom',
-                             description='Odometry frame ID for RF2O'),
         
         # Dead reckoning parameters
         DeclareLaunchArgument('dead_reckoning_odom_topic', default_value='/odom',
@@ -470,8 +470,6 @@ def generate_launch_description():
                              description='Input cmd_vel topic for dead reckoning'),
         DeclareLaunchArgument('dead_reckoning_base_frame', default_value='base_footprint',
                              description='Base frame ID for dead reckoning'),
-        DeclareLaunchArgument('dead_reckoning_odom_frame', default_value='odom',
-                             description='Odometry frame ID for dead reckoning'),
         DeclareLaunchArgument('dead_reckoning_publish_tf', default_value='true',
                              description='Publish TF transform for dead reckoning'),
         
@@ -483,24 +481,18 @@ def generate_launch_description():
         DeclareLaunchArgument('publish_static_tf', default_value='false',
                              description='Publish static transforms for robot structure'),
         
-        # Depth camera parameters (for future use)
-        DeclareLaunchArgument('use_depth_camera', default_value='false',
-                             description='Add depth camera to costmap observation sources'),
-        DeclareLaunchArgument('depth_camera_topic', default_value='/oak/stereo/image_raw',
-                             description='Depth camera topic (must be PointCloud2)'),
-        
         # ========================================================================
         # Nodes (in launch order)
         # ========================================================================
         
-        # 1. Static TF: map → odom
-        static_tf_map_to_odom,
+        # 1. Static TF: base_footprint → base_link
+        static_tf_base_footprint_to_base_link,
         
         # 2. Optional static TFs for robot structure
         static_tf_base_to_laser,
         static_tf_base_to_camera,
         
-        # 3. Odometry source (RF2O or dead reckoning)
+        # 3. Odometry source (RF2O or dead reckoning) - publishes map→base_footprint
         rf2o_odometry,
         dead_reckoning_odometry,
         

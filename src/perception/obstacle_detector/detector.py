@@ -31,7 +31,7 @@ class RoverDetectorWithPose(Node):
         self.declare_parameter('enable_buffer', True)
         self.declare_parameter('buffer_max_age', 0.5)
         self.declare_parameter('buffer_alpha', 0.7)
-        self.declare_parameter('no_gui', False)
+        self.declare_parameter('no_gui', True)
         # Depth calculation parameters
         self.declare_parameter('depth_method', 'closest_average')  # 'median', 'closest_average', 'mean'
         self.declare_parameter('closest_percentile', 0.1)  # Use closest 10% of points for averaging
@@ -55,7 +55,7 @@ class RoverDetectorWithPose(Node):
         self.enable_buffer = self.get_parameter('enable_buffer').value
         self.buffer_max_age = self.get_parameter('buffer_max_age').value
         self.buffer_alpha = self.get_parameter('buffer_alpha').value
-        self.no_gui = self.get_parameter('no_gui').value
+        self.no_gui = True #self.get_parameter('no_gui').value
         self.depth_method = self.get_parameter('depth_method').value
         self.closest_percentile = self.get_parameter('closest_percentile').value
         self.rover_length_m = self.get_parameter('rover_length_m').value
@@ -107,7 +107,6 @@ class RoverDetectorWithPose(Node):
             self.display_timer = self.create_timer(0.033, self.display_frame)
         
         self.get_logger().info("=" * 80)
-        self.get_logger().info("🤖 OPTIMIZED Rover Detector with Multi-Scale Detection")
         self.get_logger().info("=" * 80)
         self.get_logger().info(f"Low-res tracking: {self.low_res_fps} Hz @ 320px")
         self.get_logger().info(f"High-res pose: {self.high_res_fps} Hz @ 640px")
