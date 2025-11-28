@@ -85,17 +85,8 @@ class NavigationWithAvoidanceNode(Node):
         self.declare_parameter("grid_dwell_time", 0.0)
         # (Optional) could add grid_resolution, inflation_radius here if you want to expose them
 
-        # Get parameter values (normalize and accept common aliases)
-        raw_strategy = self.get_parameter("strategy_type").value
-        # Normalize: lowercase, strip whitespace, replace hyphens with underscores
-        strategy_type = str(raw_strategy).strip().lower().replace("-", "_")
-
-        # Accept some common aliases / variants
-        if strategy_type.replace(" ", "") == "discretizedobstacle":
-            strategy_type = "discretized_obstacle"
-        # If user passed variants like 'discretized-obstacle' or 'discretized obstacle'
-        if strategy_type.startswith("discretized") and "obst" in strategy_type:
-            strategy_type = "discretized_obstacle"
+        # Get parameter values
+        strategy_type = self.get_parameter("strategy_type").value
 
         # Initialize or create strategy
         if strategy is None:
