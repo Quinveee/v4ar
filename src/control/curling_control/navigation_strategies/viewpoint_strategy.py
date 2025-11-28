@@ -1,58 +1,49 @@
 """
-Viewpoint Navigation Strategy.
+Grid-based Direct Goal Navigation Strategy.
 
 Idea:
-- We have a small set of hard-coded "viewpoints" on the field where
-  marker detection / localization works well.
-- The strategy moves the robot from its current pose through each
-  viewpoint in sequence, and finally to the goal (target_x, target_y)
-  provided by follow.py.
-- For each waypoint we use an ORIENT -> DRIVE pattern (turn in place,
-  then drive forward) similar to OrientThenDriveStrategy.
-- At each intermediate viewpoint we can optionally "dwell" (stop for a
-  short time) to let the localization stack update from markers.
+- The field is discretized into a regular grid of nodes ("bins").
+- On each control step, we plan a shortest path over this grid from
+  the robot's current cell to the target's cell.
+- Obstacles are projected onto the grid and their cells are removed
+  from the search space.
+- We then drive toward the *next* node on that grid path using a
+  DirectGoal-style sub-controller:
+    * orient toward the waypoint,
+    * then move forward when approximately aligned.
+
+New behavior in this version:
+- The robot explicitly "stops at each bin":
+    * For each grid node on the A* path, we consider the cell center
+      a waypoint.
+    * When the robot is within `waypoint_tolerance` of that waypoint,
+      we command zero velocity.
+    * Optionally we dwell there for `dwell_time_at_waypoint` seconds
+      (to let localization settle).
+    * On the next cycle, A* is recomputed from the new current pose,
+      and the next grid cell along the path becomes the new waypoint.
+
+If there is no valid grid path (e.g., target surrounded by obstacles),
+we fall back to plain DirectGoal behavior (ignore obstacles).
 
 Field / coordinate system:
-- We use the same world frame as the marker_map:
+- Same as for markers and /robot_pose:
     * (0, 0)  : bottom-right corner of the field
     * (6, 0)  : bottom-left  corner
     * (0, 9)  : top-right    corner
     * (6, 9)  : top-left     corner
 - So the field is 6 m wide (x: 0 -> 6) and 9 m long (y: 0 -> 9).
 
-From Assignment 2 (all in mm):
-    A = Field length          = 9000
-    B = Field width           = 6000
-    G = Penalty area length   = 1650
-    H = Penalty area width    = 4000
-
-Converted to our frame (in meters):
-    FIELD_LENGTH         = 9.0   (along +y)
-    FIELD_WIDTH          = 6.0   (along +x)
-    PENALTY_AREA_LENGTH  = 1.65  (distance from goal line to penalty-box line)
-    PENALTY_AREA_WIDTH   = 4.0   (size of penalty box across the field)
-
-This gives:
-    - Distance from each sideline to the vertical edge of the penalty box:
-          side_offset = (FIELD_WIDTH - PENALTY_AREA_WIDTH) / 2 = 1.0 m
-      -> right-side penalty-vertical line  at x = 1.0
-      -> left-side  penalty-vertical line  at x = 5.0
-
-    - Distance from bottom / top goal line to the penalty-box line:
-          penalty_y_near = PENALTY_AREA_LENGTH          = 1.65
-          penalty_y_far  = FIELD_LENGTH - 1.65         ≈ 7.35
-
-We use these to define viewpoint paths that go:
-    1. From the first penalty-box corner on the chosen side,
-    2. To a point just before the halfway line near that sideline,
-    3. To a point just after the halfway line near that sideline,
-    4. To the far-side penalty-box corner on the same side,
-    5. Then finally to the requested (target_x, target_y).
+Grid:
+- By default: resolution = 1.0 m, so:
+    * nx = 6 cells along x (0..6)
+    * ny = 9 cells along y (0..9)
+- Each cell is represented by its center coordinate.
 """
 
 import math
-from enum import Enum
-from typing import List, Tuple, Optional
+import heapq
+from typing import List, Tuple, Optional, Dict, Set
 
 from geometry_msgs.msg import Twist, Vector3
 
@@ -60,235 +51,254 @@ from .base_strategy import BaseNavigationStrategy
 
 
 # ---------------------------------------------------------------------------
-# Field / geometry constants (in meters)
+# Field constants (in meters)
 # ---------------------------------------------------------------------------
 
-FIELD_LENGTH: float = 9.0         # goal-to-goal, along +y
-FIELD_WIDTH: float = 6.0          # sideline-to-sideline, along +x
-
-PENALTY_AREA_LENGTH: float = 1.65  # distance from goal line to box line (G)
-PENALTY_AREA_WIDTH: float = 4.0    # width of penalty area across the field (H)
-
-# Vertical (along x) offset from each sideline to the penalty-box edge
-SIDE_OFFSET: float = (FIELD_WIDTH - PENALTY_AREA_WIDTH) / 2.0  # = 1.0
-
-# Halfway line along the length of the field (y)
-HALF_LINE_Y: float = FIELD_LENGTH / 2.0  # = 4.5
-
-# How far before / after the halfway line we place intermediate viewpoints
-HALF_LINE_OFFSET: float = 1.0  # 1 m before / after half-way
+FIELD_WIDTH: float = 6.0   # along +x
+FIELD_LENGTH: float = 9.0  # along +y
 
 
-class NavigationPhase(Enum):
-    """Current phase of motion w.r.t. the active waypoint."""
-    ORIENT = "orient"
-    DRIVE = "drive"
-    COMPLETE = "complete"
-
-
-class ViewpointStrategy(BaseNavigationStrategy):
+class GridDirectGoalStrategy(BaseNavigationStrategy):
     """
-    Navigation strategy that chains ORIENT->DRIVE segments through a set
-    of predefined "viewpoints" and then goes to the final goal.
+    Grid-based navigation strategy that approximates an optimal path
+    on a discrete field mesh, then drives along that path using a
+    DirectGoal-style controller toward the next grid node.
 
-    The final goal is always the (target_x, target_y) that follow.py
-    passes in on each control step. The intermediate viewpoints are
-    chosen based on the field geometry and can be placed on the left or
-    right "lane" near the sidelines.
+    Use cases:
+    - You want something close to DirectGoal behavior, but with the
+      ability to "route around" blocked regions (obstacles).
+    - Later, you can feed in specific grid nodes to mark as blocked.
 
-    Viewpoint sequence on a given side (right or left):
-        1. Near own penalty-box edge (on that side)
-        2. Just before the halfway line, near sideline
-        3. Just after the halfway line, near sideline
-        4. Near the far penalty-box edge (same side)
-        5. Final target
+    This version:
+    - Stops at each grid-cell waypoint (within waypoint_tolerance),
+      optionally dwelling for a short time before progressing.
     """
 
     def __init__(
         self,
-        safe_distance: float = 1.0,
-        repulse_strength: float = 1.0,
         goal_tolerance: float = 0.1,
         max_linear_velocity: float = 0.2,
         angular_gain: float = 1.0,
-        orientation_tolerance: float = 0.15,   # radians
-        max_angular_velocity: float = 1.0,     # rad/s
-        control_dt: float = 0.05,              # must match follow.py timer
-        dwell_time_at_viewpoint: float = 1.0,  # seconds to pause at each VP
-        viewpoints: Optional[List[Tuple[float, float]]] = None,
-        side: Optional[str] = None,            # 'left', 'right', or None (auto)
+        min_angular_error_for_forward: float = 0.3,  # about 17 degrees
+        grid_resolution: float = 1.0,
+        obstacle_inflation_radius: float = 0.0,       # extra radius around obstacles (m)
+        waypoint_tolerance: float = 0.25,             # how close to cell center counts as "reached"
+        dwell_time_at_waypoint: float = 0.0,          # seconds to pause at each bin (0.0 = no dwell)
+        control_dt: float = 0.05,                     # should match follow.py timer
+        log_throttle_steps: int = 20,                 # print every N control cycles
+        *args,
         **kwargs,
     ):
         """
         Args:
-            safe_distance, repulse_strength: kept for compatibility with
-                other strategies; not yet used in this basic version.
-            goal_tolerance: distance threshold for "reached waypoint".
-            max_linear_velocity: forward speed when driving (m/s).
-            angular_gain: proportional gain for heading control.
-            orientation_tolerance: allowed heading error before switching
-                ORIENT -> DRIVE (rad).
-            max_angular_velocity: clamp for angular speed (rad/s).
-            control_dt: control-loop period (seconds).
-            dwell_time_at_viewpoint: how long to stop at each intermediate
-                viewpoint (seconds). Set to 0.0 to not dwell.
-            viewpoints: explicit list of (x, y) in world frame where we
-                want to localize / see markers well. If None, a default
-                path based on penalty-box corners and the halfway line
-                will be chosen.
-            side: if viewpoints is None, this can force the lane:
-                'left'  -> path near x ≈ 5 (left sideline)
-                'right' -> path near x ≈ 1 (right sideline)
-                None    -> side chosen automatically from initial pose.
+            goal_tolerance: Distance threshold to consider goal reached (meters).
+            max_linear_velocity: Forward velocity when moving (m/s).
+            angular_gain: Proportional gain for angular velocity control.
+            min_angular_error_for_forward: Minimum heading error to allow
+                forward motion (radians). Larger error -> turn in place.
+            grid_resolution: Size (in m) of each grid cell (e.g. 1.0).
+            obstacle_inflation_radius: If > 0, we block not just the obstacle
+                cell but a neighborhood around it.
+            waypoint_tolerance: Distance (m) to cell center to consider
+                that bin "reached".
+            dwell_time_at_waypoint: Duration (s) to stop at each bin before
+                moving on. Set to 0.0 to not dwell.
+            control_dt: Control-loop period (seconds). Used to convert
+                dwell time into a number of control steps.
+            log_throttle_steps: How many control steps between log prints
+                (to avoid spamming at 20 Hz). Set to 1 to log every step.
         """
-        self.safe_distance = safe_distance
-        self.repulse_strength = repulse_strength
         self.goal_tolerance = goal_tolerance
         self.max_linear_velocity = max_linear_velocity
         self.angular_gain = angular_gain
-        self.orientation_tolerance = orientation_tolerance
-        self.max_angular_velocity = max_angular_velocity
+        self.min_angular_error_for_forward = min_angular_error_for_forward
+
+        # Grid definition
+        self.grid_resolution = grid_resolution
+        self.nx = max(1, int(FIELD_WIDTH / grid_resolution))
+        self.ny = max(1, int(FIELD_LENGTH / grid_resolution))
+
+        self.obstacle_inflation_radius = max(0.0, obstacle_inflation_radius)
+
+        # Waypoint / dwell behavior
+        self.waypoint_tolerance = waypoint_tolerance
+        self.dwell_time_at_waypoint = dwell_time_at_waypoint
         self.control_dt = control_dt
 
-        # Which "lane" we ended up choosing ("left" / "right" / None)
-        self.side: Optional[str] = None
-
-        # If True, we'll construct viewpoints lazily on first call to
-        # compute_control, based on the robot pose and/or preferred side.
-        self._auto_viewpoints: bool = False
-
-        # Handle side preference
-        side_pref: Optional[str] = None
-        if isinstance(side, str):
-            s = side.lower()
-            if s in ("left", "right"):
-                side_pref = s
-
-        # Hard-coded viewpoints or auto-generated path
-        if viewpoints is None:
-            # We'll choose left/right lane at runtime.
-            self.viewpoints: List[Tuple[float, float]] = []
-            self._auto_viewpoints = True
-            self.side = side_pref  # may be None -> auto choose
-        else:
-            # Explicit viewpoints override the automatic lane generation.
-            self.viewpoints = list(viewpoints)
-            self.side = side_pref
-
-        # Index in the list [viewpoints..., final_goal]
-        self.current_waypoint_index: int = 0
-        self.phase: NavigationPhase = NavigationPhase.ORIENT
-
-        # Dwell duration (in control steps) at each intermediate viewpoint
         self.dwell_steps_required = (
-            int(dwell_time_at_viewpoint / control_dt)
-            if dwell_time_at_viewpoint > 0.0
+            int(dwell_time_at_waypoint / control_dt)
+            if dwell_time_at_waypoint > 0.0
             else 0
         )
         self._reset_dwell_state()
 
+        # Simple logging throttle
+        self.log_throttle_steps = max(1, log_throttle_steps)
+        self._step_counter: int = 0
+
+        print(
+            f"[GridDirectGoalStrategy] Init: grid_resolution={self.grid_resolution:.2f} m, "
+            f"nx={self.nx}, ny={self.ny}, goal_tolerance={self.goal_tolerance:.2f}, "
+            f"waypoint_tolerance={self.waypoint_tolerance:.2f}, "
+            f"dwell_time={self.dwell_time_at_waypoint:.2f}s "
+            f"(steps={self.dwell_steps_required})"
+        )
+
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Dwell helper
     # ------------------------------------------------------------------
 
     def _reset_dwell_state(self) -> None:
-        self.in_dwell: bool = False
-        self.dwell_steps_done: int = 0
-
-    def _side_x(self, side: str) -> float:
-        """
-        x coordinate for the given side's "lane".
-
-        'right' -> near the right sideline (x ≈ 0)
-        'left'  -> near the left  sideline (x ≈ 6)
-        """
-        if side == "right":
-            return SIDE_OFFSET                # 1.0 m from right sideline at x=0
-        else:  # 'left'
-            return FIELD_WIDTH - SIDE_OFFSET  # 1.0 m from left sideline at x=6
-
-    def _build_side_viewpoints(self, side: str) -> List[Tuple[float, float]]:
-        """
-        Build the 4 default viewpoints along the chosen side:
-
-            1. Near own penalty-box edge (on that side)
-            2. Just before the halfway line, near sideline
-            3. Just after the halfway line, near sideline
-            4. Near the far penalty-box edge (same side)
-        """
-        x_lane = self._side_x(side)
-
-        penalty_near_y = PENALTY_AREA_LENGTH
-        penalty_far_y = FIELD_LENGTH - PENALTY_AREA_LENGTH
-
-        pre_half_y = HALF_LINE_Y - HALF_LINE_OFFSET
-        post_half_y = HALF_LINE_Y + HALF_LINE_OFFSET
-
-        return [
-            (x_lane, penalty_near_y),
-            (x_lane, pre_half_y),
-            (x_lane, post_half_y),
-            (x_lane, penalty_far_y),
-        ]
-
-    def _init_viewpoints_if_needed(
-        self,
-        robot_x: float,
-        robot_y: float,
-        target_x: float,
-        target_y: float,
-    ) -> None:
-        """
-        If viewpoints were not explicitly provided, choose a lane (left /
-        right) and build the default viewpoint list based on the initial
-        robot pose.
-
-        Logic:
-            - If self.side was set ('left' or 'right'), use that.
-            - Otherwise, choose the side whose lane x is closer to the
-              current robot x position.
-        """
-        if not self._auto_viewpoints:
-            return
-
-        # Decide which side to use
-        if self.side in ("left", "right"):
-            chosen_side = self.side
-        else:
-            # Choose side based on which lane is closer in x
-            right_x = self._side_x("right")
-            left_x = self._side_x("left")
-
-            if abs(robot_x - right_x) <= abs(robot_x - left_x):
-                chosen_side = "right"
-            else:
-                chosen_side = "left"
-
-        self.viewpoints = self._build_side_viewpoints(chosen_side)
-        self.side = chosen_side
-        self._auto_viewpoints = False
-
-    def _full_path(
-        self, target_x: float, target_y: float
-    ) -> List[Tuple[float, float]]:
-        """
-        Returns the full list of waypoints for this run: all viewpoints
-        plus the final goal.
-        """
-        return self.viewpoints + [(target_x, target_y)]
-
-    @staticmethod
-    def _angle_diff(a: float, b: float) -> float:
-        """Shortest signed angular difference a - b in [-pi, pi]."""
-        d = a - b
-        return math.atan2(math.sin(d), math.cos(d))
-
-    @staticmethod
-    def _clamp(v: float, lo: float, hi: float) -> float:
-        return max(lo, min(hi, v))
+        self._in_dwell: bool = False
+        self._dwell_steps_done: int = 0
 
     # ------------------------------------------------------------------
-    # BaseNavigationStrategy interface
+    # Grid helpers
+    # ------------------------------------------------------------------
+
+    def _world_to_cell(self, x: float, y: float) -> Tuple[int, int]:
+        """
+        Map world coordinates (meters) to integer grid cell indices (ix, iy).
+        ix: 0..nx-1 (x direction), iy: 0..ny-1 (y direction).
+        """
+        xr = min(max(x, 0.0), FIELD_WIDTH - 1e-6)
+        yr = min(max(y, 0.0), FIELD_LENGTH - 1e-6)
+
+        ix = int(xr / self.grid_resolution)
+        iy = int(yr / self.grid_resolution)
+
+        ix = max(0, min(self.nx - 1, ix))
+        iy = max(0, min(self.ny - 1, iy))
+
+        return ix, iy
+
+    def _cell_to_world(self, ix: int, iy: int) -> Tuple[float, float]:
+        """
+        Map grid cell indices (ix, iy) back to world coordinates (center of cell).
+        """
+        x = (ix + 0.5) * self.grid_resolution
+        y = (iy + 0.5) * self.grid_resolution
+
+        # Clamp to field in case of rounding
+        x = min(max(x, 0.0), FIELD_WIDTH)
+        y = min(max(y, 0.0), FIELD_LENGTH)
+        return x, y
+
+    def _obstacles_to_blocked_cells(
+        self, obstacles: List[Tuple[float, float]]
+    ) -> Set[Tuple[int, int]]:
+        """
+        Convert obstacle world positions into a set of blocked grid cells.
+        If obstacle_inflation_radius > 0, we also block neighboring cells
+        within that radius.
+        """
+        blocked: Set[Tuple[int, int]] = set()
+        if not obstacles:
+            return blocked
+
+        inflation_cells = int(self.obstacle_inflation_radius / self.grid_resolution)
+
+        for (ox, oy) in obstacles:
+            ix, iy = self._world_to_cell(ox, oy)
+            if inflation_cells <= 0:
+                blocked.add((ix, iy))
+            else:
+                # Inflate a square neighborhood around this cell
+                for dx in range(-inflation_cells, inflation_cells + 1):
+                    for dy in range(-inflation_cells, inflation_cells + 1):
+                        jx = ix + dx
+                        jy = iy + dy
+                        if 0 <= jx < self.nx and 0 <= jy < self.ny:
+                            blocked.add((jx, jy))
+
+        return blocked
+
+    # ------------------------------------------------------------------
+    # Path planning (A*)
+    # ------------------------------------------------------------------
+
+    def _neighbors(self, ix: int, iy: int) -> List[Tuple[int, int]]:
+        """8-connected neighborhood in the grid."""
+        nbrs: List[Tuple[int, int]] = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                jx = ix + dx
+                jy = iy + dy
+                if 0 <= jx < self.nx and 0 <= jy < self.ny:
+                    nbrs.append((jx, jy))
+        return nbrs
+
+    def _dist_cells(self, a: Tuple[int, int], b: Tuple[int, int]) -> float:
+        """Euclidean distance between centers of two grid cells (in meters)."""
+        (ax, ay) = self._cell_to_world(*a)
+        (bx, by) = self._cell_to_world(*b)
+        return math.hypot(bx - ax, by - ay)
+
+    def _heuristic(self, a: Tuple[int, int], b: Tuple[int, int]) -> float:
+        """Heuristic for A* (Euclidean distance, in meters)."""
+        return self._dist_cells(a, b)
+
+    def _plan_path(
+        self,
+        start_cell: Tuple[int, int],
+        goal_cell: Tuple[int, int],
+        blocked: Set[Tuple[int, int]],
+    ) -> List[Tuple[int, int]]:
+        """
+        A* search on the grid, avoiding blocked cells.
+        Returns a list of cells [start_cell, ..., goal_cell].
+        If no path found, returns [].
+        """
+        if start_cell == goal_cell:
+            return [start_cell]
+
+        if goal_cell in blocked:
+            # For this basic version, treat a blocked goal cell as unreachable.
+            print("[GridDirectGoalStrategy] Goal cell is blocked; no grid path.")
+            return []
+
+        open_set: List[Tuple[float, Tuple[int, int]]] = []
+        heapq.heappush(open_set, (0.0, start_cell))
+
+        came_from: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        g_score: Dict[Tuple[int, int], float] = {start_cell: 0.0}
+        f_score: Dict[Tuple[int, int], float] = {start_cell: self._heuristic(start_cell, goal_cell)}
+
+        closed: Set[Tuple[int, int]] = set()
+
+        while open_set:
+            _, current = heapq.heappop(open_set)
+            if current in closed:
+                continue
+            closed.add(current)
+
+            if current == goal_cell:
+                # reconstruct path
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                path.reverse()
+                return path
+
+            for nb in self._neighbors(*current):
+                if nb in blocked:
+                    continue
+                tentative_g = g_score[current] + self._dist_cells(current, nb)
+
+                if nb not in g_score or tentative_g < g_score[nb]:
+                    came_from[nb] = current
+                    g_score[nb] = tentative_g
+                    f_score[nb] = tentative_g + self._heuristic(nb, goal_cell)
+                    heapq.heappush(open_set, (f_score[nb], nb))
+
+        print("[GridDirectGoalStrategy] A* failed to find a path.")
+        return []
+
+    # ------------------------------------------------------------------
+    # Core control
     # ------------------------------------------------------------------
 
     def compute_control(
@@ -298,142 +308,201 @@ class ViewpointStrategy(BaseNavigationStrategy):
         robot_yaw: float,
         target_x: float,
         target_y: float,
-        obstacles,
-    ):
+        obstacles: List[Tuple[float, float]],
+    ) -> Tuple[Twist, Optional[Vector3], bool]:
         """
-        Move through viewpoints then to final target.
+        Main control method.
 
-        Returns:
-            (Twist, heading_vector, goal_reached)
-            goal_reached is True only when the *final* goal is reached
-            (not for intermediate viewpoints).
+        1. If robot is within goal_tolerance -> stop & goal_reached True.
+        2. Convert obstacles to blocked grid cells.
+        3. Compute grid cells for start & goal.
+        4. Run A* to get cell path.
+        5. Choose the next waypoint (grid node) from that path.
+        6. If robot is close enough to that waypoint, STOP (and optionally
+           dwell) so we effectively "lock in" each bin.
+        7. Otherwise, drive toward that waypoint using DirectGoal-like logic.
+        8. If no grid path found, fall back to plain direct-to-goal.
         """
-        # Initialize default viewpoint path lazily, if needed
-        if self._auto_viewpoints:
-            self._init_viewpoints_if_needed(robot_x, robot_y, target_x, target_y)
+        self._step_counter += 1
 
-        path = self._full_path(target_x, target_y)
-        last_index = len(path) - 1
-
-        # Clamp index in case something weird happens
-        if self.current_waypoint_index > last_index:
-            self.current_waypoint_index = last_index
-
-        goal_x, goal_y = path[self.current_waypoint_index]
-        is_final_goal = self.current_waypoint_index == last_index
-
-        dx = goal_x - robot_x
-        dy = goal_y - robot_y
-        distance = math.hypot(dx, dy)
-
-        # --------------------------------------------------------------
-        # 1. Check if we have reached the current waypoint
-        # --------------------------------------------------------------
-        if distance < self.goal_tolerance:
-            # Final goal reached: stop and signal completion
-            if is_final_goal:
-                self.phase = NavigationPhase.COMPLETE
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0
-                return cmd, None, True
-
-            # Intermediate viewpoint reached:
-            # optionally dwell here to localize from markers
-            if self.dwell_steps_required > 0 and not self.in_dwell:
-                self.in_dwell = True
-                self.dwell_steps_done = 0
-
-            if self.in_dwell:
-                self.dwell_steps_done += 1
-
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0
-
-                heading_vec = Vector3()
-                heading_vec.x = math.cos(robot_yaw)
-                heading_vec.y = math.sin(robot_yaw)
-                heading_vec.z = 0.0
-
-                # After we've dwelled long enough, advance to next VP
-                if self.dwell_steps_done >= self.dwell_steps_required:
-                    self.in_dwell = False
-                    self.dwell_steps_done = 0
-                    self.current_waypoint_index += 1
-                    self.phase = NavigationPhase.ORIENT
-
-                # While dwelling we never claim the final goal is reached
-                return cmd, heading_vec, False
-
-            # No dwell configured: jump to next viewpoint but emit a stop
-            self.current_waypoint_index += 1
-            self.phase = NavigationPhase.ORIENT
-
+        # --- 1. Check goal reached (true goal, not just waypoint) ---
+        if self.is_goal_reached(robot_x, robot_y, target_x, target_y):
+            if self._step_counter % self.log_throttle_steps == 0:
+                print(
+                    f"[GridDirectGoalStrategy] Goal reached at "
+                    f"({robot_x:.2f},{robot_y:.2f}) ~ ({target_x:.2f},{target_y:.2f})"
+                )
             cmd = Twist()
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
-            return cmd, None, False
+            return cmd, None, True
 
-        # --------------------------------------------------------------
-        # 2. Not yet at waypoint -> ORIENT / DRIVE logic
-        # --------------------------------------------------------------
+        # --- 2. Map obstacles to blocked cells ---
+        blocked_cells = self._obstacles_to_blocked_cells(obstacles)
+
+        # --- 3. Compute start and goal grid cells ---
+        start_cell = self._world_to_cell(robot_x, robot_y)
+        goal_cell = self._world_to_cell(target_x, target_y)
+
+        # Ensure start/goal aren't blocked (we still want to stand on them)
+        if start_cell in blocked_cells:
+            blocked_cells.discard(start_cell)
+        if goal_cell in blocked_cells:
+            blocked_cells.discard(goal_cell)
+
+        # --- 4. A* path on grid ---
+        cell_path = self._plan_path(start_cell, goal_cell, blocked_cells)
+
+        # If no path -> fallback to plain DirectGoal behavior
+        if not cell_path:
+            if self._step_counter % self.log_throttle_steps == 0:
+                print(
+                    "[GridDirectGoalStrategy] No grid path, falling back to "
+                    "plain DirectGoal behavior."
+                )
+            return self._direct_goal_control(robot_x, robot_y, robot_yaw, target_x, target_y)
+
+        # --- 5. Choose waypoint (next node on path) ---
+        # Typically, cell_path[0] == start_cell. We want the next one if it exists.
+        if len(cell_path) >= 2:
+            next_cell = cell_path[1]
+        else:
+            # Already in same cell as goal: just use real goal coords
+            next_cell = goal_cell
+
+        waypoint_x, waypoint_y = self._cell_to_world(*next_cell)
+
+        # For logging: sample print
+        if self._step_counter % self.log_throttle_steps == 0:
+            # Show at most first 5 cells in path in log
+            preview_cells = cell_path[:5]
+            preview_world = [self._cell_to_world(ix, iy) for (ix, iy) in preview_cells]
+            print(
+                f"[GridDirectGoalStrategy] robot=({robot_x:.2f},{robot_y:.2f}), "
+                f"target=({target_x:.2f},{target_y:.2f}), "
+                f"start_cell={start_cell}, goal_cell={goal_cell}, "
+                f"blocked_cells={len(blocked_cells)}"
+            )
+            print(
+                f"[GridDirectGoalStrategy] cell_path_len={len(cell_path)}, "
+                f"path_preview_world={[(round(px,2), round(py,2)) for (px,py) in preview_world]}"
+            )
+            print(
+                f"[GridDirectGoalStrategy] Next waypoint (grid center) = "
+                f"({waypoint_x:.2f},{waypoint_y:.2f})"
+            )
+
+        # --- 6. Check if we've "reached" this bin and should stop/dwell ---
+        dist_to_wp = math.hypot(waypoint_x - robot_x, waypoint_y - robot_y)
+
+        if dist_to_wp < self.waypoint_tolerance:
+            # We're sufficiently close to this bin's center.
+            heading_vec = Vector3()
+            heading_vec.x = 0.0
+            heading_vec.y = 0.0
+            heading_vec.z = 0.0
+
+            # Handle dwell if configured
+            if self.dwell_steps_required > 0:
+                if not self._in_dwell:
+                    self._in_dwell = True
+                    self._dwell_steps_done = 0
+                    print(
+                        f"[GridDirectGoalStrategy] Reached waypoint at "
+                        f"({waypoint_x:.2f},{waypoint_y:.2f}), entering dwell for "
+                        f"{self.dwell_steps_required} steps."
+                    )
+
+                self._dwell_steps_done += 1
+
+                if self._dwell_steps_done >= self.dwell_steps_required:
+                    print(
+                        f"[GridDirectGoalStrategy] Finished dwell at waypoint "
+                        f"({waypoint_x:.2f},{waypoint_y:.2f})."
+                    )
+                    self._in_dwell = False
+                    self._dwell_steps_done = 0
+
+                # While dwelling we just stay stopped.
+                cmd = Twist()
+                cmd.linear.x = 0.0
+                cmd.angular.z = 0.0
+                return cmd, heading_vec, False
+
+            else:
+                # No dwell configured: just stop for this cycle.
+                if self._step_counter % self.log_throttle_steps == 0:
+                    print(
+                        f"[GridDirectGoalStrategy] Reached waypoint at "
+                        f"({waypoint_x:.2f},{waypoint_y:.2f}), stopping (no dwell)."
+                    )
+                cmd = Twist()
+                cmd.linear.x = 0.0
+                cmd.angular.z = 0.0
+                return cmd, heading_vec, False
+
+        # If we're not yet close enough to the bin center, ensure dwell
+        # state is cleared and drive toward it.
+        if self._in_dwell:
+            # We've moved away from the waypoint; reset dwell state.
+            self._in_dwell = False
+            self._dwell_steps_done = 0
+
+        # --- 7. Drive toward waypoint using DirectGoal-style control ---
+        cmd, heading_vec, _ = self._direct_goal_control(
+            robot_x, robot_y, robot_yaw, waypoint_x, waypoint_y
+        )
+        # We do *not* claim the final goal is reached here.
+        return cmd, heading_vec, False
+
+    # ------------------------------------------------------------------
+    # Direct-goal-like sub-controller
+    # ------------------------------------------------------------------
+
+    def _direct_goal_control(
+        self,
+        robot_x: float,
+        robot_y: float,
+        robot_yaw: float,
+        target_x: float,
+        target_y: float,
+    ) -> Tuple[Twist, Optional[Vector3], bool]:
+        """
+        Same behavior as DirectGoalStrategy: orient toward target, then
+        move forward if heading error is small enough.
+        """
+        dx = target_x - robot_x
+        dy = target_y - robot_y
 
         target_heading = math.atan2(dy, dx)
         heading_error = self._angle_diff(target_heading, robot_yaw)
+
+        angular_velocity = self.angular_gain * heading_error
+
+        if abs(heading_error) < self.min_angular_error_for_forward:
+            linear_velocity = self.max_linear_velocity
+        else:
+            linear_velocity = 0.0
+
+        cmd = Twist()
+        cmd.linear.x = linear_velocity
+        cmd.angular.z = angular_velocity
 
         heading_vec = Vector3()
         heading_vec.x = math.cos(target_heading)
         heading_vec.y = math.sin(target_heading)
         heading_vec.z = 0.0
 
-        # Phase: ORIENT
-        if self.phase == NavigationPhase.ORIENT:
-            if abs(heading_error) < self.orientation_tolerance:
-                self.phase = NavigationPhase.DRIVE
-            else:
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = self._clamp(
-                    self.angular_gain * heading_error,
-                    -self.max_angular_velocity,
-                    self.max_angular_velocity,
-                )
-                return cmd, heading_vec, False
+        return cmd, heading_vec, False
 
-        # Phase: DRIVE
-        if self.phase == NavigationPhase.DRIVE:
-            # If we drift too far in heading, go back to ORIENT
-            if abs(heading_error) > self.orientation_tolerance * 2.0:
-                self.phase = NavigationPhase.ORIENT
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = self._clamp(
-                    self.angular_gain * heading_error,
-                    -self.max_angular_velocity,
-                    self.max_angular_velocity,
-                )
-                return cmd, heading_vec, False
-
-            cmd = Twist()
-            cmd.linear.x = self.max_linear_velocity
-            cmd.angular.z = self._clamp(
-                self.angular_gain * heading_error,
-                -self.max_angular_velocity,
-                self.max_angular_velocity,
-            )
-            return cmd, heading_vec, False
-
-        # Should not really get here; default to stop
-        cmd = Twist()
-        cmd.linear.x = 0.0
-        cmd.angular.z = 0.0
-        return cmd, None, False
+    # ------------------------------------------------------------------
+    # Interface methods
+    # ------------------------------------------------------------------
 
     def reset(self) -> None:
-        """Reset strategy state to initial conditions."""
-        self.current_waypoint_index = 0
-        self.phase = NavigationPhase.ORIENT
+        """Reset any internal state."""
+        print("[GridDirectGoalStrategy] Reset called.")
+        self._step_counter = 0
         self._reset_dwell_state()
 
     def is_goal_reached(
@@ -443,41 +512,60 @@ class ViewpointStrategy(BaseNavigationStrategy):
         target_x: float,
         target_y: float,
     ) -> bool:
-        """
-        Only checks the *final* goal, not the intermediate viewpoints.
-        """
+        """Check if robot is within goal tolerance of the FINAL goal."""
         dx = target_x - robot_x
         dy = target_y - robot_y
-        return math.hypot(dx, dy) < self.goal_tolerance
+        distance = math.sqrt(dx * dx + dy * dy)
+        return distance < self.goal_tolerance
 
     def get_parameters(self) -> dict:
-        """Return current tunable parameters (for debugging / introspection)."""
+        """Get current strategy parameters."""
         return {
-            "safe_distance": self.safe_distance,
-            "repulse_strength": self.repulse_strength,
             "goal_tolerance": self.goal_tolerance,
             "max_linear_velocity": self.max_linear_velocity,
             "angular_gain": self.angular_gain,
-            "orientation_tolerance": self.orientation_tolerance,
-            "max_angular_velocity": self.max_angular_velocity,
-            "viewpoints": self.viewpoints,
-            "current_waypoint_index": self.current_waypoint_index,
-            "phase": self.phase.value,
-            "side": self.side,
+            "min_angular_error_for_forward": self.min_angular_error_for_forward,
+            "grid_resolution": self.grid_resolution,
+            "obstacle_inflation_radius": self.obstacle_inflation_radius,
+            "waypoint_tolerance": self.waypoint_tolerance,
+            "dwell_time_at_waypoint": self.dwell_time_at_waypoint,
+            "control_dt": self.control_dt,
+            "nx": self.nx,
+            "ny": self.ny,
         }
 
     def set_parameters(self, params: dict) -> None:
-        """
-        Simple parameter updating helper. You can call this from outside
-        if you want to adjust gains or viewpoints at runtime.
-        """
+        """Update strategy parameters."""
         for key, value in params.items():
-            if key == "viewpoints":
-                self.viewpoints = list(value)
-                # If viewpoints are explicitly set, we no longer auto-generate.
-                self._auto_viewpoints = False
-            elif key == "side":
-                if isinstance(value, str) and value.lower() in ("left", "right"):
-                    self.side = value.lower()
-            elif hasattr(self, key):
+            if hasattr(self, key):
                 setattr(self, key, value)
+                if key in ("grid_resolution",):
+                    # If grid resolution changes at runtime, recompute grid sizes
+                    self.nx = max(1, int(FIELD_WIDTH / self.grid_resolution))
+                    self.ny = max(1, int(FIELD_LENGTH / self.grid_resolution))
+                    print(
+                        f"[GridDirectGoalStrategy] grid_resolution updated to "
+                        f"{self.grid_resolution:.2f}, nx={self.nx}, ny={self.ny}"
+                    )
+                if key in ("dwell_time_at_waypoint", "control_dt"):
+                    # Recompute dwell steps if timing-related params change
+                    self.dwell_steps_required = (
+                        int(self.dwell_time_at_waypoint / self.control_dt)
+                        if self.dwell_time_at_waypoint > 0.0
+                        else 0
+                    )
+                    print(
+                        f"[GridDirectGoalStrategy] dwell_time={self.dwell_time_at_waypoint:.2f}s, "
+                        f"control_dt={self.control_dt:.3f}s -> "
+                        f"dwell_steps_required={self.dwell_steps_required}"
+                    )
+
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _angle_diff(a: float, b: float) -> float:
+        """Compute the shortest angular difference between two angles."""
+        d = a - b
+        return math.atan2(math.sin(d), math.cos(d))

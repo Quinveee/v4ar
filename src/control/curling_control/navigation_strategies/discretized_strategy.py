@@ -12,31 +12,24 @@ Idea:
     * orient toward the waypoint,
     * then move forward when approximately aligned.
 
-New behavior in this version:
+Behavior:
 - The robot explicitly "stops at each bin":
     * We keep track of a persistent `_current_target_cell`.
-    * As soon as the robot is inside that grid cell (or close enough to
-      its center), we consider that bin "reached".
+    * As soon as the robot is inside that grid cell, we consider that
+      bin "reached".
     * We stop and optionally dwell.
     * Then we clear `_current_target_cell` so on the next cycle we pick
       the next bin along the grid path.
 
-If there is no valid grid path (e.g., target surrounded by obstacles),
-we fall back to plain DirectGoal behavior (ignore obstacles).
+Important simplification:
+- For intermediate bins, we don't care about distance to the bin center:
+  entering the bin at all is enough.
+- For the final bin (the cell that contains the global goal), we do a
+  direct-goal-style refinement all the way to the actual goal position
+  (so we don't get stuck far from the goal inside the same bin).
 
-Field / coordinate system:
-- Same as for markers and /robot_pose:
-    * (0, 0)  : bottom-right corner of the field
-    * (6, 0)  : bottom-left  corner
-    * (0, 9)  : top-right    corner
-    * (6, 9)  : top-left     corner
-- So the field is 6 m wide (x: 0 -> 6) and 9 m long (y: 0 -> 9).
-
-Grid:
-- By default: resolution = 0.5 m, so:
-    * nx = 12 cells along x (0..6)
-    * ny = 18 cells along y (0..9)
-- Each cell is represented by its center coordinate.
+If A* cannot find a valid grid path (e.g., fully blocked), we simply
+stop (no fallback to a non-grid navigation strategy).
 """
 
 import math
@@ -62,16 +55,13 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
     on a discrete field mesh, then drives along that path using a
     DirectGoal-style controller toward the next grid node.
 
-    Use cases:
-    - You want something close to DirectGoal behavior, but with the
-      ability to "route around" blocked regions (obstacles).
-    - Later, you can feed in specific grid nodes to mark as blocked.
-
     This version:
     - Uses a persistent `_current_target_cell` so we don't fight for
       the exact cell center on every step.
     - A bin is considered reached as soon as the robot is inside that
-      cell (or very close to its center).
+      cell (for intermediate bins).
+    - Exposes `get_debug_info()` so a higher-level node can publish the
+      grid path, blocked cells, and current target for visualization.
     """
 
     def __init__(
@@ -82,7 +72,7 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
         min_angular_error_for_forward: float = 0.3,  # about 17 degrees
         grid_resolution: float = 0.5,
         obstacle_inflation_radius: float = 0.0,       # extra radius around obstacles (m)
-        waypoint_tolerance: float = 0.25,             # extra slack around cell center (m)
+        waypoint_tolerance: float = 0.25,             # kept as a param; not used for bin logic now
         dwell_time_at_waypoint: float = 0.0,          # seconds to pause at each bin (0.0 = no dwell)
         control_dt: float = 0.05,                     # should match follow.py timer
         log_throttle_steps: int = 20,                 # print every N control cycles
@@ -99,8 +89,8 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
             grid_resolution: Size (in m) of each grid cell.
             obstacle_inflation_radius: If > 0, we block not just the obstacle
                 cell but a neighborhood around it.
-            waypoint_tolerance: Extra distance (m) around cell center to still
-                consider the bin reached (in addition to "inside cell").
+            waypoint_tolerance: Unused for bins in this simplified version
+                (bin is reached purely by cell entry), kept for compatibility.
             dwell_time_at_waypoint: Duration (s) to stop at each bin before
                 moving on. Set to 0.0 to not dwell.
             control_dt: Control-loop period (seconds). Used to convert
@@ -139,6 +129,14 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
         # Simple logging throttle
         self.log_throttle_steps = max(1, log_throttle_steps)
         self._step_counter: int = 0
+
+        # Debug info for visualization
+        self._debug_last_blocked_cells: Set[Tuple[int, int]] = set()
+        self._debug_last_path_cells: List[Tuple[int, int]] = []
+        self._debug_last_start_cell: Optional[Tuple[int, int]] = None
+        self._debug_last_goal_cell: Optional[Tuple[int, int]] = None
+        self._debug_last_target_cell: Optional[Tuple[int, int]] = None
+        self._debug_last_target_center: Optional[Tuple[float, float]] = None
 
         print(
             f"[GridDirectGoalStrategy] Init: grid_resolution={self.grid_resolution:.2f} m, "
@@ -259,7 +257,6 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
             return [start_cell]
 
         if goal_cell in blocked:
-            # For this basic version, treat a blocked goal cell as unreachable.
             print("[GridDirectGoalStrategy] Goal cell is blocked; no grid path.")
             return []
 
@@ -268,7 +265,9 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
 
         came_from: Dict[Tuple[int, int], Tuple[int, int]] = {}
         g_score: Dict[Tuple[int, int], float] = {start_cell: 0.0}
-        f_score: Dict[Tuple[int, int], float] = {start_cell: self._heuristic(start_cell, goal_cell)}
+        f_score: Dict[Tuple[int, int], float] = {
+            start_cell: self._heuristic(start_cell, goal_cell)
+        }
 
         closed: Set[Tuple[int, int]] = set()
 
@@ -322,12 +321,13 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
         3. Compute grid cells for start & goal.
         4. Run A* to get cell path.
         5. Maintain / select `_current_target_cell` along that path.
-        6. If robot is inside that cell (or close enough to its center),
-           STOP (and optionally dwell), then advance to next bin (on
-           next cycle).
-        7. Otherwise, drive toward that bin center using DirectGoal-like
-           logic.
-        8. If no grid path found, fall back to plain direct-to-goal.
+        6. If this target cell is NOT the final goal cell:
+             - As soon as the robot's current cell == target cell,
+               STOP (and optionally dwell) and then move to the next bin.
+        7. If this target cell IS the final goal cell:
+             - Ignore bin-centering; just drive directly to the *true*
+               goal pose until `goal_tolerance` is met.
+        8. If no grid path found, stop (no non-grid fallback).
         """
         self._step_counter += 1
 
@@ -371,17 +371,24 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
         # --- 4. A* path on grid ---
         cell_path = self._plan_path(start_cell, goal_cell, blocked_cells)
 
-        # If no path -> fallback to plain DirectGoal behavior
+        # Update debug info (path + blocked)
+        self._debug_last_blocked_cells = set(blocked_cells)
+        self._debug_last_path_cells = list(cell_path)
+        self._debug_last_start_cell = start_cell
+        self._debug_last_goal_cell = goal_cell
+
+        # If no path -> stop, but do not claim goal reached
         if not cell_path:
             if self._step_counter % self.log_throttle_steps == 0:
                 print(
-                    "[GridDirectGoalStrategy] No grid path, falling back to "
-                    "plain DirectGoal behavior."
+                    "[GridDirectGoalStrategy] No grid path; stopping (no fallback)."
                 )
-            # Clear any stale target cell
             self._current_target_cell = None
             self._current_target_center = None
-            return self._direct_goal_control(robot_x, robot_y, robot_yaw, target_x, target_y)
+            cmd = Twist()
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            return cmd, None, False
 
         # --- 5. Maintain / choose current target bin ------------------
         if self._current_target_cell is None:
@@ -408,6 +415,10 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
         target_cell = self._current_target_cell
         waypoint_x, waypoint_y = self._current_target_center
 
+        # Debug: track current target
+        self._debug_last_target_cell = target_cell
+        self._debug_last_target_center = (waypoint_x, waypoint_y)
+
         # For logging: sample print
         if self._step_counter % self.log_throttle_steps == 0:
             preview_cells = cell_path[:5]
@@ -427,20 +438,28 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
                 f"center=({waypoint_x:.2f},{waypoint_y:.2f})"
             )
 
-        # --- 6. Check if we've "reached" this bin ---------------------
-        # A bin is considered reached if:
-        #   - our current cell == target_cell, OR
-        #   - our distance to its center < waypoint_tolerance
+        # --- 6. Intermediate bins: just enter the cell ----------------
         in_target_cell = (start_cell == target_cell)
-        dist_to_wp = math.hypot(waypoint_x - robot_x, waypoint_y - robot_y)
+        is_final_cell = (target_cell == goal_cell)
 
-        if in_target_cell or dist_to_wp < self.waypoint_tolerance:
+        # For the FINAL cell (the one that contains the goal), we *do not*
+        # use the bin-reached logic. We just drive directly to the global
+        # goal so we don't get stuck far away inside the same bin.
+        if is_final_cell:
+            cmd, heading_vec, _ = self._direct_goal_control(
+                robot_x, robot_y, robot_yaw, target_x, target_y
+            )
+            return cmd, heading_vec, False
+
+        # For intermediate bins: as soon as we ENTER the bin (cell indices
+        # match), we stop/dwell and on the next cycle we'll pick the next
+        # bin along the grid path.
+        if in_target_cell:
             heading_vec = Vector3()
             heading_vec.x = 0.0
             heading_vec.y = 0.0
             heading_vec.z = 0.0
 
-            # Handle dwell if configured
             if self.dwell_steps_required > 0:
                 if not self._in_dwell:
                     self._in_dwell = True
@@ -465,7 +484,6 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
                     self._current_target_cell = None
                     self._current_target_center = None
 
-                # While dwelling (or just finished), we stay stopped this cycle.
                 cmd = Twist()
                 cmd.linear.x = 0.0
                 cmd.angular.z = 0.0
@@ -479,7 +497,6 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
                         f"center=({waypoint_x:.2f},{waypoint_y:.2f}), stopping (no dwell). "
                         f"Will pick next bin on next cycle."
                     )
-                # Clear target so the next cycle selects the next bin.
                 self._current_target_cell = None
                 self._current_target_center = None
 
@@ -488,10 +505,8 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
                 cmd.angular.z = 0.0
                 return cmd, heading_vec, False
 
-        # If we're not yet close enough to the bin center / in the bin,
-        # ensure dwell state is cleared and drive toward it.
+        # If we're not yet inside the target bin, ensure dwell state is cleared
         if self._in_dwell:
-            # We've moved away from the waypoint; reset dwell state.
             self._in_dwell = False
             self._dwell_steps_done = 0
 
@@ -554,6 +569,13 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
         self._current_target_cell = None
         self._current_target_center = None
 
+        self._debug_last_blocked_cells.clear()
+        self._debug_last_path_cells = []
+        self._debug_last_start_cell = None
+        self._debug_last_goal_cell = None
+        self._debug_last_target_cell = None
+        self._debug_last_target_center = None
+
     def is_goal_reached(
         self,
         robot_x: float,
@@ -610,6 +632,47 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
                     )
 
     # ------------------------------------------------------------------
+    # Debug / logging API
+    # ------------------------------------------------------------------
+
+    def get_debug_info(self) -> dict:
+        """
+        Return a dictionary with the latest grid planning info for logging
+        / visualization. All world positions are in meters.
+
+        Keys:
+            grid_resolution: float
+            nx, ny: int
+            start_cell, goal_cell: (ix, iy) or None
+            path_cells: List[(ix, iy)]
+            path_world: List[(x, y)]
+            blocked_cells: List[(ix, iy)]
+            blocked_world: List[(x, y)]
+            current_target_cell: (ix, iy) or None
+            current_target_center: (x, y) or None
+        """
+        path_world = [
+            self._cell_to_world(ix, iy) for (ix, iy) in self._debug_last_path_cells
+        ]
+        blocked_world = [
+            self._cell_to_world(ix, iy) for (ix, iy) in self._debug_last_blocked_cells
+        ]
+
+        return {
+            "grid_resolution": self.grid_resolution,
+            "nx": self.nx,
+            "ny": self.ny,
+            "start_cell": self._debug_last_start_cell,
+            "goal_cell": self._debug_last_goal_cell,
+            "path_cells": list(self._debug_last_path_cells),
+            "path_world": path_world,
+            "blocked_cells": list(self._debug_last_blocked_cells),
+            "blocked_world": blocked_world,
+            "current_target_cell": self._debug_last_target_cell,
+            "current_target_center": self._debug_last_target_center,
+        }
+
+    # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
 
@@ -618,3 +681,4 @@ class GridDirectGoalStrategy(BaseNavigationStrategy):
         """Compute the shortest angular difference between two angles."""
         d = a - b
         return math.atan2(math.sin(d), math.cos(d))
+
