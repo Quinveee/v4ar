@@ -31,19 +31,7 @@ class RoverDetectorWithPose(Node):
         self.declare_parameter('enable_buffer', True)
         self.declare_parameter('buffer_max_age', 0.5)
         self.declare_parameter('buffer_alpha', 0.7)
-        self.declare_parameter('no_gui', False)
-        # Depth calculation parameters
-        self.declare_parameter('depth_method', 'closest_average')  # 'median', 'closest_average', 'mean'
-        self.declare_parameter('closest_percentile', 0.1)  # Use closest 10% of points for averaging
-        # Rover physical dimensions (for footprint calculation and filtering)
-        self.declare_parameter('rover_length_m', 0.25)  # Known rover length in meters (25cm)
-        self.declare_parameter('rover_width_m', 0.25)  # Known rover width in meters (25cm)
-        self.declare_parameter('rover_height_m', 0.25)  # Known rover height in meters (25cm)
-        # Size filtering parameters (tolerance for detection)
-        self.declare_parameter('size_filter_enabled', True)  # Enable size-based filtering
-        self.declare_parameter('min_size_ratio', 0.5)  # Minimum size relative to expected (50% of expected)
-        self.declare_parameter('max_size_ratio', 2.0)  # Maximum size relative to expected (200% of expected)
-        self.declare_parameter('aspect_ratio_tolerance', 0.5)  # Allow aspect ratio deviation (0.5 = 50% tolerance)
+        self.declare_parameter('no_gui', False)  # NEW: GUI control
         
         # Get parameters
         self.low_res_fps = self.get_parameter('low_res_fps').value
@@ -56,15 +44,6 @@ class RoverDetectorWithPose(Node):
         self.buffer_max_age = self.get_parameter('buffer_max_age').value
         self.buffer_alpha = self.get_parameter('buffer_alpha').value
         self.no_gui = self.get_parameter('no_gui').value
-        self.depth_method = self.get_parameter('depth_method').value
-        self.closest_percentile = self.get_parameter('closest_percentile').value
-        self.rover_length_m = self.get_parameter('rover_length_m').value
-        self.rover_width_m = self.get_parameter('rover_width_m').value
-        self.rover_height_m = self.get_parameter('rover_height_m').value
-        self.size_filter_enabled = self.get_parameter('size_filter_enabled').value
-        self.min_size_ratio = self.get_parameter('min_size_ratio').value
-        self.max_size_ratio = self.get_parameter('max_size_ratio').value
-        self.aspect_ratio_tolerance = self.get_parameter('aspect_ratio_tolerance').value
 
         # Camera intrinsics
         self.fx = None
@@ -112,9 +91,6 @@ class RoverDetectorWithPose(Node):
         self.get_logger().info(f"Low-res tracking: {self.low_res_fps} Hz @ 320px")
         self.get_logger().info(f"High-res pose: {self.high_res_fps} Hz @ 640px")
         self.get_logger().info(f"Max distance: {self.max_distance}m")
-        self.get_logger().info(f"Rover size: {self.rover_length_m*100:.0f}x{self.rover_width_m*100:.0f}x{self.rover_height_m*100:.0f} cm")
-        self.get_logger().info(f"Size filter: {'Enabled' if self.size_filter_enabled else 'Disabled'} "
-                              f"(ratio: {self.min_size_ratio:.1f}-{self.max_size_ratio:.1f}x)")
         self.get_logger().info(f"Buffering: {'Enabled' if self.enable_buffer else 'Disabled'}")
         self.get_logger().info(f"GUI: {'Disabled' if self.no_gui else 'Enabled'}")
         self.get_logger().info("=" * 80)
@@ -159,137 +135,6 @@ class RoverDetectorWithPose(Node):
         angle_v = math.atan((v - self.cy) / self.fy)
         
         return (angle_h, -angle_v)
-    
-    def _estimate_rover_orientation(self, depth_bbox, valid_depths, bbox_w, bbox_h, scale_factor):
-        """
-        Estimate rover orientation from depth differences across bounding box.
-        Returns orientation angle in radians (0 = facing camera, positive = rotated right).
-        """
-        if len(valid_depths) < 4 or depth_bbox.size == 0:
-            return 0.0
-        
-        try:
-            # Get depth at left and right halves of bbox
-            mid_x = depth_bbox.shape[1] // 2
-            left_half = depth_bbox[:, :mid_x]
-            right_half = depth_bbox[:, mid_x:]
-            
-            left_depths = left_half[left_half > 0]
-            right_depths = right_half[right_half > 0]
-            
-            if len(left_depths) == 0 or len(right_depths) == 0:
-                return 0.0
-            
-            # Average depth on each side
-            left_avg = np.mean(left_depths)
-            right_avg = np.mean(right_depths)
-            
-            # If one side is significantly closer, rover is rotated
-            depth_diff = right_avg - left_avg
-            
-            # Estimate orientation from depth difference
-            # Larger depth difference = more rotation
-            # Use bbox width to normalize
-            if bbox_w > 0:
-                # Approximate: depth_diff / bbox_width gives rotation estimate
-                # This is a simplified model - could be improved with proper geometry
-                orientation_rad = math.atan2(depth_diff, bbox_w * 10.0)  # Scale factor for sensitivity
-                # Clamp to reasonable range
-                orientation_rad = np.clip(orientation_rad, -math.pi/3, math.pi/3)
-            else:
-                orientation_rad = 0.0
-            
-            return float(orientation_rad)
-        except Exception as e:
-            self.get_logger().debug(f"Orientation estimation failed: {e}")
-            return 0.0
-    
-    def _passes_size_filter(self, footprint_size, bbox_w_px, bbox_h_px):
-        """
-        Filter detections based on expected rover size.
-        Returns True if the detection matches expected rover dimensions.
-        """
-        footprint_length, footprint_width = footprint_size
-        
-        # Expected rover dimensions
-        expected_length = self.rover_length_m
-        expected_width = self.rover_width_m
-        
-        # Check if footprint dimensions are within tolerance
-        length_ratio = footprint_length / expected_length
-        width_ratio = footprint_width / expected_width
-        
-        # Both dimensions should be within the size ratio range
-        if (length_ratio < self.min_size_ratio or length_ratio > self.max_size_ratio or
-            width_ratio < self.min_size_ratio or width_ratio > self.max_size_ratio):
-            return False
-        
-        # Check aspect ratio (should be roughly square for a cube)
-        # Calculate aspect ratio from footprint
-        footprint_aspect = max(footprint_length, footprint_width) / min(footprint_length, footprint_width)
-        expected_aspect = max(expected_length, expected_width) / min(expected_length, expected_width)
-        
-        # Allow some tolerance in aspect ratio
-        aspect_deviation = abs(footprint_aspect - expected_aspect) / expected_aspect
-        if aspect_deviation > self.aspect_ratio_tolerance:
-            return False
-        
-        # Also check bounding box aspect ratio (should be roughly square)
-        bbox_aspect = max(bbox_w_px, bbox_h_px) / min(bbox_w_px, bbox_h_px) if min(bbox_w_px, bbox_h_px) > 0 else 999
-        # For a cube viewed from an angle, aspect ratio can vary, but shouldn't be too extreme
-        if bbox_aspect > 3.0:  # Too elongated
-            return False
-        
-        return True
-    
-    def _calculate_rover_footprint(self, distance_m, bbox_w_px, bbox_h_px, orientation_rad):
-        """
-        Calculate rover footprint size in meters from bounding box and distance.
-        Accounts for perspective and orientation.
-        
-        Returns: (length_m, width_m) - actual rover dimensions in world
-        """
-        if not self.camera_info_received or distance_m <= 0:
-            return (self.rover_length_m, self.rover_width_m)
-        
-        try:
-            # Convert pixel dimensions to angular size
-            # Then convert to world size using distance
-            
-            # Angular size of bbox
-            angle_w = 2 * math.atan((bbox_w_px / 2) / self.fx)
-            angle_h = 2 * math.atan((bbox_h_px / 2) / self.fy)
-            
-            # World size at distance (simplified - assumes flat ground)
-            world_w = 2 * distance_m * math.tan(angle_w / 2)
-            world_h = 2 * distance_m * math.tan(angle_h / 2)
-            
-            # Account for orientation - if rotated, swap length/width
-            # Use known rover dimensions to determine which is which
-            if abs(orientation_rad) > math.pi / 4:
-                # More rotated - swap dimensions
-                estimated_length = max(world_w, world_h)
-                estimated_width = min(world_w, world_h)
-            else:
-                # Less rotated - use as-is
-                estimated_length = max(world_w, world_h)
-                estimated_width = min(world_w, world_h)
-            
-            # Blend with known dimensions (weighted average)
-            # Trust measured dimensions more when close, measured bbox more when far
-            blend_factor = min(1.0, distance_m / 2.0)  # More trust in bbox when far
-            
-            final_length = (1 - blend_factor) * self.rover_length_m + blend_factor * estimated_length
-            final_width = (1 - blend_factor) * self.rover_width_m + blend_factor * estimated_width
-            
-            # Clamp to reasonable values
-            final_length = np.clip(final_length, 0.1, 1.0)
-            final_width = np.clip(final_width, 0.1, 1.0)
-            
-            return (float(final_length), float(final_width))
-        except Exception as e:
-            self.get_logger().debug(f"Footprint calculation failed: {e}")
-            return (self.rover_length_m, self.rover_width_m)
 
     def assign_rover_id(self, center, distance):
         """Assign persistent ID using nearest-neighbor tracking"""
@@ -359,32 +204,19 @@ class RoverDetectorWithPose(Node):
                 cx = x + w // 2
                 cy = y + h // 2
                 
-                # Get depth from entire bounding box (for better orientation estimation)
-                bbox_y1 = max(0, y)
-                bbox_y2 = min(depth_scaled.shape[0], y + h)
-                bbox_x1 = max(0, x)
-                bbox_x2 = min(depth_scaled.shape[1], x + w)
-                depth_bbox = depth_scaled[bbox_y1:bbox_y2, bbox_x1:bbox_x2]
-                valid_depths = depth_bbox[depth_bbox > 0]
+                # Get depth
+                roi_size = int(self.depth_roi_size * scale_factor)
+                roi_y1 = max(0, cy - roi_size)
+                roi_y2 = min(depth_scaled.shape[0], cy + roi_size)
+                roi_x1 = max(0, cx - roi_size)
+                roi_x2 = min(depth_scaled.shape[1], cx + roi_size)
+                depth_roi = depth_scaled[roi_y1:roi_y2, roi_x1:roi_x2]
+                valid_depths = depth_roi[depth_roi > 0]
                 
                 if len(valid_depths) == 0:
                     continue
                 
-                # Calculate depth using selected method
-                if self.depth_method == 'closest_average':
-                    # Use closest N% of points and average them
-                    num_closest = max(1, int(len(valid_depths) * self.closest_percentile))
-                    closest_depths = np.partition(valid_depths, num_closest - 1)[:num_closest]
-                    avg_depth_mm = np.mean(closest_depths)
-                elif self.depth_method == 'mean':
-                    avg_depth_mm = np.mean(valid_depths)
-                else:  # 'median' (default)
-                    avg_depth_mm = np.median(valid_depths)
-                
-                # Calculate orientation from depth gradient across bbox
-                # Get depth at corners/edges to estimate orientation
-                orientation_rad = self._estimate_rover_orientation(
-                    depth_bbox, valid_depths, w, h, scale_factor)
+                avg_depth_mm = np.median(valid_depths)
                 
                 # Scale back to full resolution
                 inv_scale = 1.0 / scale_factor
@@ -410,15 +242,6 @@ class RoverDetectorWithPose(Node):
                 
                 angle_h, angle_v = self.calculate_angles(cx_full, cy_full)
                 
-                # Calculate rover footprint (bird's eye view size)
-                footprint_size = self._calculate_rover_footprint(
-                    distance, w_full, h_full, orientation_rad)
-                
-                # Size-based filtering
-                if self.size_filter_enabled:
-                    if not self._passes_size_filter(footprint_size, w_full, h_full):
-                        continue  # Skip this detection - doesn't match expected rover size
-                
                 detections.append({
                     'bbox': (x_full, y_full, w_full, h_full),
                     'center': (cx_full, cy_full),
@@ -426,9 +249,6 @@ class RoverDetectorWithPose(Node):
                     'distance': distance,
                     'angle_h': angle_h,
                     'angle_v': angle_v,
-                    'orientation': orientation_rad,  # Rover yaw in camera frame
-                    'footprint_length': footprint_size[0],  # Length in meters
-                    'footprint_width': footprint_size[1],   # Width in meters
                     'area': area * (inv_scale ** 2),
                     'resolution': target_width
                 })
@@ -488,16 +308,7 @@ class RoverDetectorWithPose(Node):
             pose.position.x = float(det['point_3d'][0])
             pose.position.y = float(det['point_3d'][1])
             pose.position.z = float(det['point_3d'][2])
-            
-            # Set orientation from estimated rover yaw
-            # Orientation is in camera frame: yaw around Z axis
-            yaw = det.get('orientation', 0.0)
-            # Convert yaw to quaternion (rotation around Z axis)
-            pose.orientation.z = math.sin(yaw / 2.0)
-            pose.orientation.w = math.cos(yaw / 2.0)
-            pose.orientation.x = 0.0
-            pose.orientation.y = 0.0
-            
+            pose.orientation.w = 1.0
             rover_msg.pose = pose
             
             rover_msg.distance = float(det['distance'])
@@ -513,10 +324,6 @@ class RoverDetectorWithPose(Node):
             rover_msg.bbox_y_max = float(y + h)
             rover_msg.area = float(det['area'])
             rover_msg.confidence = min(1.0, det['area'] / 5000.0)
-            
-            # Bird's eye view footprint
-            rover_msg.footprint_length = float(det.get('footprint_length', self.rover_length_m))
-            rover_msg.footprint_width = float(det.get('footprint_width', self.rover_width_m))
             
             # Buffering
             if self.enable_buffer and rover_id in self.rover_buffer:

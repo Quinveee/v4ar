@@ -28,6 +28,7 @@ setup(
             'maker = visualizations.maker_visualization_node:main',
             'marker_detector = visualizations.marker_detection_visualizer:main',
             'control_visualization = visualizations.control_visualization_node:main',
+            'rover_detection_visualization_node = visualizations.rover_detection_visualization_node:main',
         ],
     },
 )

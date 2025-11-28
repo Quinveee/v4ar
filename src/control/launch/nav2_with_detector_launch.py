@@ -24,11 +24,6 @@ def generate_launch_description():
     
     # Get package directories
     try:
-        nav2_bringup_dir = FindPackageShare('nav2_bringup').find('nav2_bringup')
-    except:
-        nav2_bringup_dir = '/opt/ros/humble/share/nav2_bringup'
-    
-    try:
         control_package_dir = FindPackageShare('control').find('control')
     except:
         control_package_dir = os.path.dirname(os.path.dirname(__file__))
@@ -36,9 +31,6 @@ def generate_launch_description():
     # Declare launch arguments
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     autostart = LaunchConfiguration('autostart', default='true')
-    use_lifecycle_mgr = LaunchConfiguration('use_lifecycle_mgr', default='true')
-    map_yaml_file = LaunchConfiguration('map', default='')
-    params_file = LaunchConfiguration('params_file', default='')
     
     # Nav2 speed parameters
     max_vel_x = LaunchConfiguration('max_vel_x', default='0.3')
@@ -64,7 +56,7 @@ def generate_launch_description():
     start_theta = LaunchConfiguration('start_theta', default='0.0')
     
     # Odometry source selection
-    odometry_source = LaunchConfiguration('odometry_source', default='rf2o')  # 'rf2o' or 'dead_reckoning'
+    odometry_source = LaunchConfiguration('odometry_source', default='rf2o')
     
     # RF2O laser odometry parameters
     rf2o_laser_scan_topic = LaunchConfiguration('rf2o_laser_scan_topic', default='/scan')
@@ -83,228 +75,279 @@ def generate_launch_description():
     launch_visualization = LaunchConfiguration('launch_visualization', default='false')
     
     # Robot frame parameters
-    publish_static_tf = LaunchConfiguration('publish_static_tf', default='false')  # Set to false since you already have static TFs
+    publish_static_tf = LaunchConfiguration('publish_static_tf', default='false')
     
-    # Nav2 controller parameters (speed configuration)
+    # Nav2 controller parameters (FLATTENED - single level nesting)
     controller_params = {
-        'controller_server': {
-            'ros__parameters': {
-                'controller_frequency': 20.0,
-                'min_x_velocity_threshold': 0.001,
-                'min_y_velocity_threshold': 0.5,
-                'min_theta_velocity_threshold': 0.001,
-                'failure_tolerance': 0.3,
-                'progress_checker_plugin': 'progress_checker',
-                'goal_checker_plugins': ['general_goal_checker', 'precise_goal_checker'],
-                'general_goal_checker': {
-                    'plugin': 'nav2_controller::SimpleGoalChecker',
-                    'xy_goal_tolerance': 0.25,
-                    'yaw_goal_tolerance': 0.25,
-                },
-                'precise_goal_checker': {
-                    'plugin': 'nav2_controller::SimpleGoalChecker',
-                    'xy_goal_tolerance': 0.1,
-                    'yaw_goal_tolerance': 0.1,
-                },
-                'progress_checker': {
-                    'plugin': 'nav2_controller::SimpleProgressChecker',
-                    'required_movement_radius': 0.5,
-                    'movement_time_allowance': 10.0,
-                },
-                'FollowPath': {
-                    'plugin': 'nav2_controller::FollowPath',
-                    'desired_linear_vel': max_vel_x,
-                    'base_desired_linear_vel': max_vel_x,
-                    'max_linear_acc': acc_lim_x,
-                    'max_linear_decel': acc_lim_x,
-                    'max_angular_acc': acc_lim_theta,
-                    'max_angular_decel': acc_lim_theta,
-                    'in_place_angular_vel': min_vel_theta,
-                    'min_in_place_angular_vel': min_vel_theta,
-                    'allow_backward': True,
-                    'max_angular_vel': max_vel_theta,
-                    'min_linear_vel': min_vel_x,
-                    'max_linear_vel': max_vel_x,
-                    'min_angular_vel': min_vel_theta,
-                },
-            }
-        }
+        'use_sim_time': use_sim_time,
+        'controller_frequency': 20.0,
+        'min_x_velocity_threshold': 0.001,
+        'min_y_velocity_threshold': 0.5,
+        'min_theta_velocity_threshold': 0.001,
+        'failure_tolerance': 0.3,
+        'progress_checker_plugin': 'progress_checker',
+        'goal_checker_plugins': ['general_goal_checker'],
+        'controller_plugins': ['FollowPath'],
+        'general_goal_checker': {
+            'plugin': 'nav2_controller::SimpleGoalChecker',
+            'xy_goal_tolerance': 0.25,
+            'yaw_goal_tolerance': 0.25,
+            'stateful': True,
+        },
+        'progress_checker': {
+            'plugin': 'nav2_controller::SimpleProgressChecker',
+            'required_movement_radius': 0.5,
+            'movement_time_allowance': 10.0,
+        },
+        'FollowPath': {
+            'plugin': 'dwb_core::DWBLocalPlanner',
+            'debug_trajectory_details': False,
+            'min_vel_x': min_vel_x,
+            'min_vel_y': 0.0,
+            'max_vel_x': max_vel_x,
+            'max_vel_y': 0.0,
+            'max_vel_theta': max_vel_theta,
+            'min_speed_xy': min_vel_x,
+            'max_speed_xy': max_vel_x,
+            'min_speed_theta': min_vel_theta,
+            'acc_lim_x': acc_lim_x,
+            'acc_lim_y': 0.0,
+            'acc_lim_theta': acc_lim_theta,
+            'decel_lim_x': acc_lim_x,
+            'decel_lim_y': 0.0,
+            'decel_lim_theta': acc_lim_theta,
+            'vx_samples': 20,
+            'vy_samples': 0,
+            'vtheta_samples': 40,
+            'sim_time': 1.7,
+            'linear_granularity': 0.05,
+            'angular_granularity': 0.025,
+            'transform_tolerance': 0.2,
+            'xy_goal_tolerance': 0.25,
+            'trans_stopped_velocity': 0.25,
+            'short_circuit_trajectory_evaluation': True,
+            'stateful': True,
+            'critics': ['RotateToGoal', 'Oscillation', 'BaseObstacle', 'GoalAlign', 'PathAlign', 'PathDist', 'GoalDist'],
+            'BaseObstacle.scale': 0.02,
+            'PathAlign.scale': 32.0,
+            'PathAlign.forward_point_distance': 0.1,
+            'GoalAlign.scale': 24.0,
+            'GoalAlign.forward_point_distance': 0.1,
+            'PathDist.scale': 32.0,
+            'GoalDist.scale': 24.0,
+            'RotateToGoal.scale': 32.0,
+            'RotateToGoal.slowing_factor': 5.0,
+            'RotateToGoal.lookahead_time': -1.0,
+        },
     }
     
-    # Nav2 planner parameters (speed configuration)
-    # 
-    # Nav2 Planners Explained:
-    # - nav2_navfn_planner/NavfnPlanner: Classic Dijkstra/A* based planner, fast and reliable
-    #   - Good for: Simple environments, quick planning
-    #   - Uses: Grid-based pathfinding with potential fields
-    # - nav2_smac_planner/SmacPlanner: State Lattice planner with motion models
-    #   - Good for: Complex environments, non-holonomic robots, smoother paths
-    #   - Uses: State space search with Reeds-Shepp or Dubins curves
-    #   - Better for: Robots that can't turn in place, need smooth curves
+    # Nav2 planner parameters (FLATTENED)
     planner_params = {
-        'planner_server': {
-            'ros__parameters': {
-                'expected_planner_frequency': 20.0,
-                # NavfnPlanner - Classic grid-based planner (always available)
-                'GridBased': {
-                    'plugin': 'nav2_navfn_planner/NavfnPlanner',
-                    'tolerance': 0.5,
-                    'use_astar': False,  # False = Dijkstra (guaranteed optimal), True = A* (faster)
-                    'allow_unknown': True,  # Allow planning through unknown space
-                },
-                # SmacPlanner - State lattice planner (if nav2_smac_planner is installed)
-                'SmacPlanner': {
-                    'plugin': 'nav2_smac_planner/SmacPlanner',
-                    'tolerance': 0.5,
-                    'max_iterations': 1000000,
-                    'max_planning_time': 5.0,
-                    'motion_model_for_search': 'REEDS_SHEPP',  # Options: DUBIN, REEDS_SHEPP, STATE_LATTICE
-                    'max_linear_acc': acc_lim_x,
-                    'max_angular_acc': acc_lim_theta,
-                    'max_linear_vel': max_vel_x,
-                    'max_angular_vel': max_vel_theta,
-                    'min_linear_vel': min_vel_x,
-                    'min_angular_vel': min_vel_theta,
-                },
-            }
-        }
-    }
-    
-    # Nav2 costmap parameters
-    costmap_params = {
-                'global_costmap': {
-            'ros__parameters': {
-                'global_frame': 'map',
-                'robot_base_frame': 'base_footprint',  # Nav2 typically uses base_footprint
-                'update_frequency': 1.0,
-                'publish_frequency': 1.0,
-                'static_layer': {
-                    'plugin': 'nav2_costmap_2d::StaticLayer',
-                    'enabled': True,
-                },
-                'obstacle_layer': {
-                    'plugin': 'nav2_costmap_2d::ObstacleLayer',
-                    'enabled': True,
-                    'observation_sources': 'scan',
-                    'scan': {
-                        'topic': '/scan',
-                        'max_obstacle_height': 2.0,
-                        'clearing': True,
-                        'marking': True,
-                        'data_type': 'LaserScan',
-                        'expected_update_rate': 0.0,
-                        'observation_persistence': 0.0,
-                        'inf_is_valid': False,
-                    },
-                },
-                'inflation_layer': {
-                    'plugin': 'nav2_costmap_2d::InflationLayer',
-                    'cost_scaling_factor': 3.0,
-                    'inflation_radius': 0.55,
-                },
-            }
-        },
-        'local_costmap': {
-            'ros__parameters': {
-                'global_frame': 'odom',
-                'robot_base_frame': 'base_footprint',  # Nav2 typically uses base_footprint
-                'update_frequency': 5.0,
-                'publish_frequency': 2.0,
-                'obstacle_layer': {
-                    'plugin': 'nav2_costmap_2d::ObstacleLayer',
-                    'enabled': True,
-                    'observation_sources': 'scan',
-                    'scan': {
-                        'topic': '/scan',
-                        'max_obstacle_height': 2.0,
-                        'clearing': True,
-                        'marking': True,
-                        'data_type': 'LaserScan',
-                        'expected_update_rate': 0.0,
-                        'observation_persistence': 0.0,
-                        'inf_is_valid': False,
-                    },
-                },
-                'inflation_layer': {
-                    'plugin': 'nav2_costmap_2d::InflationLayer',
-                    'cost_scaling_factor': 3.0,
-                    'inflation_radius': 0.55,
-                },
-            }
+        'use_sim_time': use_sim_time,
+        'expected_planner_frequency': 20.0,
+        'planner_plugins': ['GridBased'],
+        'GridBased': {
+            'plugin': 'nav2_navfn_planner/NavfnPlanner',
+            'tolerance': 0.5,
+            'use_astar': False,
+            'allow_unknown': True,
         },
     }
     
-    # Combine all parameters
-    all_params = {**controller_params, **planner_params, **costmap_params}
-    
-    # Nav2 bringup launch (optional - disabled by default since individual nodes are used)
-    # Only include if use_nav2_bringup is explicitly set to true
-    nav2_bringup_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(nav2_bringup_dir, 'launch', 'bringup_launch.py')
-        ),
-        launch_arguments=[
-            ('use_sim_time', use_sim_time),
-            ('autostart', autostart),
-            ('use_lifecycle_mgr', use_lifecycle_mgr),
-            ('map', map_yaml_file),
-            ('params_file', params_file),
+    # Nav2 BT Navigator parameters (FLATTENED)
+    bt_navigator_params = {
+        'use_sim_time': use_sim_time,
+        'global_frame': 'map',
+        'robot_base_frame': 'base_footprint',
+        'odom_topic': '/odom',
+        'bt_loop_duration': 10,
+        'default_server_timeout': 20,
+        'enable_groot_monitoring': False,
+        'groot_zmq_publisher_port': 1666,
+        'groot_zmq_server_port': 1667,
+        'plugin_lib_names': [
+            'nav2_compute_path_to_pose_action_bt_node',
+            'nav2_compute_path_through_poses_action_bt_node',
+            'nav2_smooth_path_action_bt_node',
+            'nav2_follow_path_action_bt_node',
+            'nav2_spin_action_bt_node',
+            'nav2_wait_action_bt_node',
+            'nav2_back_up_action_bt_node',
+            'nav2_drive_on_heading_bt_node',
+            'nav2_clear_costmap_service_bt_node',
+            'nav2_is_stuck_condition_bt_node',
+            'nav2_goal_reached_condition_bt_node',
+            'nav2_goal_updated_condition_bt_node',
+            'nav2_globally_updated_goal_condition_bt_node',
+            'nav2_is_path_valid_condition_bt_node',
+            'nav2_initial_pose_received_condition_bt_node',
+            'nav2_reinitialize_global_localization_service_bt_node',
+            'nav2_rate_controller_bt_node',
+            'nav2_distance_controller_bt_node',
+            'nav2_speed_controller_bt_node',
+            'nav2_truncate_path_action_bt_node',
+            'nav2_truncate_path_local_action_bt_node',
+            'nav2_goal_updater_node_bt_node',
+            'nav2_recovery_node_bt_node',
+            'nav2_pipeline_sequence_bt_node',
+            'nav2_round_robin_node_bt_node',
+            'nav2_transform_available_condition_bt_node',
+            'nav2_time_expired_condition_bt_node',
+            'nav2_path_expiring_timer_condition',
+            'nav2_distance_traveled_condition_bt_node',
+            'nav2_single_trigger_bt_node',
+            'nav2_is_battery_low_condition_bt_node',
+            'nav2_navigate_through_poses_action_bt_node',
+            'nav2_navigate_to_pose_action_bt_node',
+            'nav2_remove_passed_goals_action_bt_node',
+            'nav2_planner_selector_bt_node',
+            'nav2_controller_selector_bt_node',
+            'nav2_goal_checker_selector_bt_node',
+            'nav2_controller_cancel_bt_node',
+            'nav2_path_longer_on_approach_bt_node',
+            'nav2_wait_cancel_bt_node',
+            'nav2_spin_cancel_bt_node',
+            'nav2_back_up_cancel_bt_node',
+            'nav2_drive_on_heading_cancel_bt_node',
         ],
-        condition=IfCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
-    )
+    }
     
-    # Launch Nav2 nodes individually (default - used when bringup is not available)
-    # These nodes are required for Nav2 navigation:
-    # - bt_navigator: Brain that coordinates everything
-    # - planner_server: Plans path from start to goal
-    # - controller_server: Follows the planned path
-    # - nav2_costmap_2d: Obstacle detection/avoidance (global and local costmaps)
-    # - lifecycle_manager: Starts/manages all Nav2 nodes
+    # Global costmap parameters (FLATTENED - NO double nesting)
+    global_costmap_params = {
+        'use_sim_time': use_sim_time,
+        'global_frame': 'map',
+        'robot_base_frame': 'base_footprint',
+        'update_frequency': 1.0,
+        'publish_frequency': 1.0,
+        'resolution': 0.05,
+        'robot_radius': 0.15,
+        'track_unknown_space': True,
+        'rolling_window': False,
+        'width': 10,
+        'height': 10,
+        'origin_x': -5.0,
+        'origin_y': -5.0,
+        'always_send_full_costmap': True,
+        'plugins': ['obstacle_layer', 'inflation_layer'],
+        'obstacle_layer': {
+            'plugin': 'nav2_costmap_2d::ObstacleLayer',
+            'enabled': True,
+            'footprint_clearing_enabled': True,
+            'max_obstacle_height': 2.0,
+            'combination_method': 1,
+            'observation_sources': 'scan',
+            'scan': {
+                'topic': '/scan',
+                'max_obstacle_height': 2.0,
+                'clearing': True,
+                'marking': True,
+                'data_type': 'LaserScan',
+                'raytrace_max_range': 3.0,
+                'raytrace_min_range': 0.0,
+                'obstacle_max_range': 2.5,
+                'obstacle_min_range': 0.0,
+            },
+        },
+        'inflation_layer': {
+            'plugin': 'nav2_costmap_2d::InflationLayer',
+            'cost_scaling_factor': 3.0,
+            'inflation_radius': 0.55,
+        },
+    }
+    
+    # Local costmap parameters (FLATTENED - NO double nesting)
+    local_costmap_params = {
+        'use_sim_time': use_sim_time,
+        'global_frame': 'odom',
+        'robot_base_frame': 'base_footprint',
+        'update_frequency': 5.0,
+        'publish_frequency': 2.0,
+        'resolution': 0.05,
+        'robot_radius': 0.15,
+        'rolling_window': True,
+        'width': 5,
+        'height': 5,
+        'always_send_full_costmap': True,
+        'plugins': ['obstacle_layer', 'inflation_layer'],
+        'obstacle_layer': {
+            'plugin': 'nav2_costmap_2d::ObstacleLayer',
+            'enabled': True,
+            'footprint_clearing_enabled': True,
+            'max_obstacle_height': 2.0,
+            'combination_method': 1,
+            'observation_sources': 'scan',
+            'scan': {
+                'topic': '/scan',
+                'max_obstacle_height': 2.0,
+                'clearing': True,
+                'marking': True,
+                'data_type': 'LaserScan',
+                'raytrace_max_range': 3.0,
+                'raytrace_min_range': 0.0,
+                'obstacle_max_range': 2.5,
+                'obstacle_min_range': 0.0,
+            },
+        },
+        'inflation_layer': {
+            'plugin': 'nav2_costmap_2d::InflationLayer',
+            'cost_scaling_factor': 3.0,
+            'inflation_radius': 0.55,
+        },
+    }
+    
+    # BT Navigator node
     nav2_bt_navigator = Node(
         package='nav2_bt_navigator',
         executable='bt_navigator',
         name='bt_navigator',
         output='screen',
-        parameters=[all_params],
-        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+        parameters=[bt_navigator_params],
     )
     
+    # Planner server node
     nav2_planner = Node(
         package='nav2_planner',
         executable='planner_server',
         name='planner_server',
         output='screen',
-        parameters=[all_params],
-        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+        parameters=[planner_params],
     )
     
+    # Controller server node
     nav2_controller = Node(
         package='nav2_controller',
         executable='controller_server',
         name='controller_server',
         output='screen',
-        parameters=[all_params],
-        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+        parameters=[controller_params],
     )
     
-    # Global costmap
+    # Global costmap node (FIXED - proper structure)
     nav2_global_costmap = Node(
         package='nav2_costmap_2d',
         executable='nav2_costmap_2d',
         name='global_costmap',
+        namespace='',
         output='screen',
-        parameters=[all_params],
-        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+        parameters=[global_costmap_params],
+        remappings=[
+            ('/tf', 'tf'),
+            ('/tf_static', 'tf_static'),
+        ],
     )
     
-    # Local costmap
+    # Local costmap node (FIXED - proper structure)
     nav2_local_costmap = Node(
         package='nav2_costmap_2d',
         executable='nav2_costmap_2d',
         name='local_costmap',
+        namespace='',
         output='screen',
-        parameters=[all_params],
-        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+        parameters=[local_costmap_params],
+        remappings=[
+            ('/tf', 'tf'),
+            ('/tf_static', 'tf_static'),
+        ],
     )
     
     # Lifecycle manager - starts/manages all Nav2 nodes
@@ -324,10 +367,9 @@ def generate_launch_description():
                 'local_costmap',
             ]
         }],
-        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
     )
     
-    # Obstacle detector node (now has entry point in perception/setup.py)
+    # Obstacle detector node
     obstacle_detector_node = Node(
         package='perception',
         executable='rover_detector_with_pose',
@@ -342,9 +384,6 @@ def generate_launch_description():
     )
     
     # RF2O Laser Odometry node
-    # RF2O (Range Flow 2D Odometry) generates odometry from laser scan motion
-    # This provides smooth odometry between AprilTag localization updates
-    # Note: RF2O publishes odom → base_footprint transform
     rf2o_odometry = Node(
         package='rf2o_laser_odometry',
         executable='rf2o_laser_odometry_node',
@@ -353,10 +392,10 @@ def generate_launch_description():
         parameters=[{
             'laser_scan_topic': rf2o_laser_scan_topic,
             'odom_topic': rf2o_odom_topic,
-            'base_frame_id': rf2o_base_frame,  # Uses base_footprint to match your TF tree
+            'base_frame_id': rf2o_base_frame,
             'odom_frame_id': rf2o_odom_frame,
             'publish_tf': True,
-            'freq': 20.0,  # Publication frequency
+            'freq': 20.0,
         }],
         condition=IfCondition(
             PythonExpression(["'", odometry_source, "' == 'rf2o'"])
@@ -364,9 +403,6 @@ def generate_launch_description():
     )
     
     # Dead Reckoning Odometry node
-    # Dead reckoning from commanded velocity (cmd_vel)
-    # Use this when laser odometry is not available
-    # Note: Publishes odom → base_footprint transform
     dead_reckoning_odometry = Node(
         package='control',
         executable='dead_reckoning_odom',
@@ -378,7 +414,7 @@ def generate_launch_description():
             'base_frame_id': dead_reckoning_base_frame,
             'odom_frame_id': dead_reckoning_odom_frame,
             'publish_tf': dead_reckoning_publish_tf,
-            'publish_rate': 50.0,  # Hz
+            'publish_rate': 50.0,
         }],
         condition=IfCondition(
             PythonExpression(["'", odometry_source, "' == 'dead_reckoning'"])
@@ -420,16 +456,22 @@ def generate_launch_description():
         condition=IfCondition(launch_nav2_strategy)
     )
     
+    # Static transform: map → odom (identity transform)
+    static_tf_map_to_odom = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='map_to_odom_tf',
+        arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom']
+    )
+    
     # Static transforms for robot structure (if needed)
-    # Note: Your TF tree already has these transforms, so publish_static_tf defaults to false
-    # Only enable if you need to override or add missing transforms
     static_tf_base_to_laser = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='base_to_laser_tf',
         arguments=[
             '0.0398145505519817', '0.0', '0.04', '0.0', '0.0', '0.7071080798594737', '0.7071054825112364',
-            'base_link', 'base_lidar_link'  # Using your actual frame name
+            'base_link', 'base_lidar_link'
         ],
         condition=IfCondition(publish_static_tf)
     )
@@ -440,106 +482,45 @@ def generate_launch_description():
         name='base_to_camera_tf',
         arguments=[
             '0.06531', '0.0', '0.021953', '0.0', '0.0', '0.0', '1.0',
-            'base_link', '3d_camera_link'  # Using your actual frame name
+            'base_link', '3d_camera_link'
         ],
         condition=IfCondition(publish_static_tf)
     )
     
     return LaunchDescription([
         # Launch arguments
-        DeclareLaunchArgument('use_sim_time', default_value='false',
-                             description='Use simulation time'),
-        DeclareLaunchArgument('autostart', default_value='true',
-                             description='Automatically startup Nav2 lifecycle nodes. '
-                             'When true, lifecycle_manager automatically transitions Nav2 nodes '
-                             'from unconfigured → inactive → active states. When false, you must '
-                             'manually activate nodes using lifecycle commands.'),
-        DeclareLaunchArgument('use_lifecycle_mgr', default_value='true',
-                             description='Use lifecycle manager for Nav2 nodes'),
-        DeclareLaunchArgument('map', default_value='',
-                             description='Path to map yaml file'),
-        DeclareLaunchArgument('params_file', default_value='',
-                             description='Path to Nav2 parameters file'),
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('autostart', default_value='true'),
+        DeclareLaunchArgument('max_vel_x', default_value='0.3'),
+        DeclareLaunchArgument('min_vel_x', default_value='0.05'),
+        DeclareLaunchArgument('max_vel_theta', default_value='1.0'),
+        DeclareLaunchArgument('min_vel_theta', default_value='0.1'),
+        DeclareLaunchArgument('acc_lim_x', default_value='0.5'),
+        DeclareLaunchArgument('acc_lim_theta', default_value='1.0'),
+        DeclareLaunchArgument('detector_no_gui', default_value='true'),
+        DeclareLaunchArgument('detector_max_distance', default_value='4.0'),
+        DeclareLaunchArgument('start_x', default_value='0.0'),
+        DeclareLaunchArgument('start_y', default_value='0.0'),
+        DeclareLaunchArgument('start_theta', default_value='0.0'),
+        DeclareLaunchArgument('launch_nav2_strategy', default_value='false'),
+        DeclareLaunchArgument('nav2_strategy_target_x', default_value='5.0'),
+        DeclareLaunchArgument('nav2_strategy_target_y', default_value='4.0'),
+        DeclareLaunchArgument('nav2_strategy_auto_navigate', default_value='true'),
+        DeclareLaunchArgument('odometry_source', default_value='rf2o'),
+        DeclareLaunchArgument('rf2o_laser_scan_topic', default_value='/scan'),
+        DeclareLaunchArgument('rf2o_odom_topic', default_value='/odom_rf2o'),
+        DeclareLaunchArgument('rf2o_base_frame', default_value='base_footprint'),
+        DeclareLaunchArgument('rf2o_odom_frame', default_value='odom'),
+        DeclareLaunchArgument('dead_reckoning_odom_topic', default_value='/odom'),
+        DeclareLaunchArgument('dead_reckoning_cmd_vel_topic', default_value='/cmd_vel'),
+        DeclareLaunchArgument('dead_reckoning_base_frame', default_value='base_footprint'),
+        DeclareLaunchArgument('dead_reckoning_odom_frame', default_value='odom'),
+        DeclareLaunchArgument('dead_reckoning_publish_tf', default_value='true'),
+        DeclareLaunchArgument('launch_visualization', default_value='false'),
+        DeclareLaunchArgument('publish_static_tf', default_value='false'),
         
-        # Speed parameters
-        DeclareLaunchArgument('max_vel_x', default_value='0.3',
-                             description='Maximum linear velocity (m/s)'),
-        DeclareLaunchArgument('min_vel_x', default_value='0.05',
-                             description='Minimum linear velocity (m/s)'),
-        DeclareLaunchArgument('max_vel_theta', default_value='1.0',
-                             description='Maximum angular velocity (rad/s)'),
-        DeclareLaunchArgument('min_vel_theta', default_value='0.1',
-                             description='Minimum angular velocity (rad/s)'),
-        DeclareLaunchArgument('acc_lim_x', default_value='0.5',
-                             description='Linear acceleration limit (m/s²)'),
-        DeclareLaunchArgument('acc_lim_theta', default_value='1.0',
-                             description='Angular acceleration limit (rad/s²)'),
-        
-        # Obstacle detector parameters
-        DeclareLaunchArgument('detector_no_gui', default_value='true',
-                             description='Disable GUI for obstacle detector'),
-        DeclareLaunchArgument('detector_max_distance', default_value='4.0',
-                             description='Maximum detection distance (meters)'),
-        
-        # Starting position parameters
-        DeclareLaunchArgument('start_x', default_value='0.0',
-                             description='Starting x position in world frame (meters)'),
-        DeclareLaunchArgument('start_y', default_value='0.0',
-                             description='Starting y position in world frame (meters)'),
-        DeclareLaunchArgument('start_theta', default_value='0.0',
-                             description='Starting orientation in world frame (radians)'),
-        
-        # Nav2 strategy parameters
-        DeclareLaunchArgument('launch_nav2_strategy', default_value='false',
-                             description='Launch Nav2 strategy node'),
-        DeclareLaunchArgument('nav2_strategy_target_x', default_value='5.0',
-                             description='Nav2 strategy target x position (default: 5.0 for example)'),
-        DeclareLaunchArgument('nav2_strategy_target_y', default_value='4.0',
-                             description='Nav2 strategy target y position (default: 4.0 for example)'),
-        DeclareLaunchArgument('nav2_strategy_auto_navigate', default_value='true',
-                             description='Auto-navigate on startup. When true, automatically sends '
-                             'navigation goal to Nav2 when strategy node starts. When false, you must '
-                             'manually trigger navigation via service or code.'),
-        
-        # Odometry source selection
-        DeclareLaunchArgument('odometry_source', default_value='rf2o',
-                             description='Odometry source: "rf2o" (laser-based) or "dead_reckoning" (cmd_vel-based)'),
-        
-        # RF2O parameters
-        DeclareLaunchArgument('rf2o_laser_scan_topic', default_value='/scan',
-                             description='Laser scan topic for RF2O'),
-        DeclareLaunchArgument('rf2o_odom_topic', default_value='/odom_rf2o',
-                             description='Output odometry topic from RF2O'),
-        DeclareLaunchArgument('rf2o_base_frame', default_value='base_footprint',
-                             description='Base frame ID for RF2O (should match your TF tree)'),
-        DeclareLaunchArgument('rf2o_odom_frame', default_value='odom',
-                             description='Odometry frame ID for RF2O'),
-        
-        # Dead reckoning parameters
-        DeclareLaunchArgument('dead_reckoning_odom_topic', default_value='/odom',
-                             description='Output odometry topic for dead reckoning'),
-        DeclareLaunchArgument('dead_reckoning_cmd_vel_topic', default_value='/cmd_vel',
-                             description='Input cmd_vel topic for dead reckoning'),
-        DeclareLaunchArgument('dead_reckoning_base_frame', default_value='base_footprint',
-                             description='Base frame ID for dead reckoning'),
-        DeclareLaunchArgument('dead_reckoning_odom_frame', default_value='odom',
-                             description='Odometry frame ID for dead reckoning'),
-        DeclareLaunchArgument('dead_reckoning_publish_tf', default_value='true',
-                             description='Publish TF transform for dead reckoning'),
-        
-        # Visualization parameters
-        DeclareLaunchArgument('launch_visualization', default_value='false',
-                             description='Launch control visualization node'),
-        
-        # TF parameters
-        DeclareLaunchArgument('publish_static_tf', default_value='false',
-                             description='Publish static transforms. Set to false if your URDF/robot '
-                             'description already publishes these transforms (default: false)'),
-        DeclareLaunchArgument('use_nav2_bringup', default_value='false',
-                             description='Use Nav2 bringup launch file (true) or launch nodes individually (false). '
-                             'Default is false to use individual nodes.'),
         # Nodes
-        nav2_bringup_launch,
+        static_tf_map_to_odom,
         nav2_bt_navigator,
         nav2_planner,
         nav2_controller,
@@ -554,4 +535,3 @@ def generate_launch_description():
         static_tf_base_to_laser,
         static_tf_base_to_camera,
     ])
-

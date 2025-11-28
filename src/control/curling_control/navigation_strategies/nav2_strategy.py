@@ -40,7 +40,7 @@ class Nav2NavigationStrategy(Node):
         self.declare_parameter("publish_obstacle_costmap", True)
         self.declare_parameter("target_x", 0.0)
         self.declare_parameter("target_y", 0.0)
-        self.declare_parameter("target_yaw", None)  # Optional
+        self.declare_parameter("target_yaw", 0.0)  # Optional yaw angle (default: 0.0)
         self.declare_parameter("auto_navigate", False)  # Auto-navigate on startup
 
         self.goal_tolerance = self.get_parameter("goal_tolerance").value
