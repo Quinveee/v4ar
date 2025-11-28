@@ -237,29 +237,36 @@ def generate_launch_description():
     # Combine all parameters
     all_params = {**controller_params, **planner_params, **costmap_params}
     
-    # Nav2 bringup launch
+    # Nav2 bringup launch (optional - disabled by default since individual nodes are used)
+    # Only include if use_nav2_bringup is explicitly set to true
     nav2_bringup_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(nav2_bringup_dir, 'launch', 'bringup_launch.py')
         ),
-        launch_arguments={
-            'use_sim_time': use_sim_time,
-            'autostart': autostart,
-            'use_lifecycle_mgr': use_lifecycle_mgr,
-            'map': map_yaml_file,
-            'params_file': params_file,
-        }.items(),
-        condition=IfCondition(LaunchConfiguration('use_nav2_bringup', default='true'))
+        launch_arguments=[
+            ('use_sim_time', use_sim_time),
+            ('autostart', autostart),
+            ('use_lifecycle_mgr', use_lifecycle_mgr),
+            ('map', map_yaml_file),
+            ('params_file', params_file),
+        ],
+        condition=IfCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
     )
     
-    # Or launch Nav2 nodes individually if bringup doesn't work
+    # Launch Nav2 nodes individually (default - used when bringup is not available)
+    # These nodes are required for Nav2 navigation:
+    # - bt_navigator: Brain that coordinates everything
+    # - planner_server: Plans path from start to goal
+    # - controller_server: Follows the planned path
+    # - nav2_costmap_2d: Obstacle detection/avoidance (global and local costmaps)
+    # - lifecycle_manager: Starts/manages all Nav2 nodes
     nav2_bt_navigator = Node(
         package='nav2_bt_navigator',
         executable='bt_navigator',
         name='bt_navigator',
         output='screen',
         parameters=[all_params],
-        condition=IfCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
     )
     
     nav2_planner = Node(
@@ -268,7 +275,7 @@ def generate_launch_description():
         name='planner_server',
         output='screen',
         parameters=[all_params],
-        condition=IfCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
     )
     
     nav2_controller = Node(
@@ -277,18 +284,30 @@ def generate_launch_description():
         name='controller_server',
         output='screen',
         parameters=[all_params],
-        condition=IfCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
     )
     
-    nav2_costmap = Node(
+    # Global costmap
+    nav2_global_costmap = Node(
         package='nav2_costmap_2d',
         executable='nav2_costmap_2d',
         name='global_costmap',
         output='screen',
         parameters=[all_params],
-        condition=IfCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
     )
     
+    # Local costmap
+    nav2_local_costmap = Node(
+        package='nav2_costmap_2d',
+        executable='nav2_costmap_2d',
+        name='local_costmap',
+        output='screen',
+        parameters=[all_params],
+        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+    )
+    
+    # Lifecycle manager - starts/manages all Nav2 nodes
     nav2_lifecycle = Node(
         package='nav2_lifecycle_manager',
         executable='lifecycle_manager',
@@ -305,7 +324,7 @@ def generate_launch_description():
                 'local_costmap',
             ]
         }],
-        condition=IfCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
+        condition=UnlessCondition(LaunchConfiguration('use_nav2_bringup', default='false'))
     )
     
     # Obstacle detector node (now has entry point in perception/setup.py)
@@ -516,14 +535,16 @@ def generate_launch_description():
         DeclareLaunchArgument('publish_static_tf', default_value='false',
                              description='Publish static transforms. Set to false if your URDF/robot '
                              'description already publishes these transforms (default: false)'),
-        DeclareLaunchArgument('use_nav2_bringup', default_value='true',
-                             description='Use Nav2 bringup launch file (true) or launch nodes individually (false)'),
+        DeclareLaunchArgument('use_nav2_bringup', default_value='false',
+                             description='Use Nav2 bringup launch file (true) or launch nodes individually (false). '
+                             'Default is false to use individual nodes.'),
         # Nodes
         nav2_bringup_launch,
         nav2_bt_navigator,
         nav2_planner,
         nav2_controller,
-        nav2_costmap,
+        nav2_global_costmap,
+        nav2_local_costmap,
         nav2_lifecycle,
         rf2o_odometry,
         dead_reckoning_odometry,
