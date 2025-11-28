@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import copy
-from typing import Dict
+from typing import Dict, List
 
 import rclpy
 from rclpy.node import Node
@@ -94,23 +94,30 @@ class AprilTagVisualizationNode(Node):
 
         self.get_logger().info("Using hardcoded default calibration parameters.")
 
-        # Parameters
+        # Parameters (same interface as original node)
         self.declare_parameter('tag_family', tag_family)
         self.declare_parameter('image_topic', '/image_raw')
         self.declare_parameter('output_dir', output_dir)
         self.declare_parameter('use_raw', False)
 
-        # NEW: buffer-related parameters
+        # Buffer-related parameters (unchanged API)
         self.declare_parameter('enable_buffer', False)
         self.declare_parameter('buffer_max_age_sec', 0.3)
         self.declare_parameter('buffer_distance_alpha', 0.6)
 
-        # NEW: multiscale-related parameters
+        # Multiscale-related parameters
         self.declare_parameter('enable_multiscale', False)
-        # Comma-separated list of scales, e.g. "0.7,1.0,1.4"
         self.declare_parameter('multiscale_scales', '1.0')
 
-        # NEW: visualization-related parameters
+        # ROI / temporal smoothing parameters (new, but optional)
+        self.declare_parameter('enable_roi_tracking', True)
+        self.declare_parameter('roi_half_size', 80)
+        self.declare_parameter('roi_upscale', 3.0)
+        self.declare_parameter('max_history', 5)
+        # 0.0 = no filtering, anything goes. You can raise this later.
+        self.declare_parameter('decision_margin_threshold', 0.0)
+
+        # Visualization-related parameters
         self.declare_parameter('enable_gui', False)
         self.declare_parameter('publish_debug_image', False)
 
@@ -144,16 +151,13 @@ class AprilTagVisualizationNode(Node):
         # new_K used for PnP
         self.new_K = None
 
-        # AprilTag detector
-        # For rectified images with small distant markers, use high sensitivity settings:
-        # - decimate=0.25: Very sensitive (detects smaller tags at greater distances)
-        # - blur=0.5: Moderate blur to reduce noise while preserving edges
-        # - refine_edges=True: Improve corner localization accuracy for pose estimation
+        # === Stronger detector config for tiny / far tags ===
+        # Keep maxhamming=2 on rover to avoid memory issues.
         self.detector = apriltag(
             self.tag_family,
             threads=4,
             maxhamming=2,
-            decimate=0.25,  # High sensitivity for small distant markers
+            decimate=0.25,    # full-res
             blur=0.5,
             refine_edges=True,
             debug=False
@@ -162,16 +166,17 @@ class AprilTagVisualizationNode(Node):
             f"AprilTag detector initialized: {self.tag_family}"
         )
         self.get_logger().info(
-            f"Detector params: decimate=0.25 (high sensitivity), blur=0.5, refine_edges=True"
+            "Detector params: decimate=1.0 (full-res), blur=0.0, "
+            "refine_edges=True, maxhamming=2"
         )
         self.get_logger().info(
             "Image preprocessing: CLAHE (clipLimit=3.0) + Subtle Unsharp Mask"
         )
         self.get_logger().info(
-            "Extended range strategy: Aggressive multiscale fallback (0.7x, 0.5x scales)"
+            "Extended range strategy: Multiscale upscaling + ROI tracking + temporal smoothing."
         )
 
-        # Subscription: processed image
+        # Subscription: processed image (same as original)
         self.sub = self.create_subscription(
             Image,
             '/processed_image',   # or image_topic if you want
@@ -179,22 +184,36 @@ class AprilTagVisualizationNode(Node):
             10
         )
 
-        # Publisher for marker poses
+        # Publisher for marker poses (same topic as original)
         self.pub = self.create_publisher(
             MarkerPoseArray, '/detected_markers', 10
         )
 
-        # --- NEW: internal state for buffering ---
+        # --- Buffer config (unchanged behaviour) ---
         self.enable_buffer = self.get_parameter('enable_buffer').value
         self.buffer_max_age_sec = self.get_parameter('buffer_max_age_sec').value
         self.buffer_distance_alpha = self.get_parameter('buffer_distance_alpha').value
 
-        # --- NEW: multiscale config ---
+        # --- Multiscale config ---
         self.enable_multiscale = self.get_parameter('enable_multiscale').value
         multiscale_str = self.get_parameter('multiscale_scales').value
         self.multiscale_scales = self._parse_multiscale_scales(multiscale_str)
 
-        # --- NEW: visualization flags ---
+        # --- ROI / temporal config ---
+        self.enable_roi_tracking = self.get_parameter('enable_roi_tracking').value
+        self.roi_half_size = int(self.get_parameter('roi_half_size').value)
+        self.roi_upscale = float(self.get_parameter('roi_upscale').value)
+        self.max_history = int(self.get_parameter('max_history').value)
+        self.decision_margin_threshold = float(
+            self.get_parameter('decision_margin_threshold').value
+        )
+
+        # id -> list of recent detections (for smoothing)
+        self.tag_histories: Dict[int, List[dict]] = {}
+        # id -> {"center": (cx, cy), "distance": d} from last frame (for ROI)
+        self.last_smoothed_tags: Dict[int, dict] = {}
+
+        # --- Visualization flags ---
         self.enable_gui = self.get_parameter('enable_gui').value
         self.publish_debug_image = self.get_parameter('publish_debug_image').value
 
@@ -209,12 +228,19 @@ class AprilTagVisualizationNode(Node):
 
         # Setup GUI windows if requested
         if self.enable_gui:
-            cv2.namedWindow("AprilTag Original", cv2.WINDOW_NORMAL)
-            cv2.namedWindow("AprilTag Detected", cv2.WINDOW_NORMAL)
-            cv2.resizeWindow("AprilTag Original", 640, 480)
-            cv2.resizeWindow("AprilTag Detected", 640, 480)
+            try:
+                cv2.namedWindow("AprilTag Original", cv2.WINDOW_NORMAL)
+                cv2.namedWindow("AprilTag Detected", cv2.WINDOW_NORMAL)
+                cv2.resizeWindow("AprilTag Original", 640, 480)
+                cv2.resizeWindow("AprilTag Detected", 640, 480)
+                self.get_logger().info("OpenCV GUI visualization ENABLED.")
+            except cv2.error as e:
+                self.get_logger().warn(f"OpenCV GUI error when creating windows: {e}")
+                self.enable_gui = False
+        else:
+            self.get_logger().info("OpenCV GUI visualization DISABLED.")
 
-        # id -> {"marker": MarkerPose, "last_seen": Time}
+        # id -> {"marker": MarkerPose, "last_seen": Time} for buffer
         self.marker_state: Dict[int, Dict[str, object]] = {}
 
         if self.enable_buffer:
@@ -232,15 +258,24 @@ class AprilTagVisualizationNode(Node):
         else:
             self.get_logger().info("Multiscale detection DISABLED (using single scale).")
 
-        if self.enable_gui:
-            self.get_logger().info("OpenCV GUI visualization ENABLED.")
+        if self.enable_roi_tracking:
+            self.get_logger().info(
+                f"ROI tracking ENABLED: half_size={self.roi_half_size}, "
+                f"upscale={self.roi_upscale}"
+            )
         else:
-            self.get_logger().info("OpenCV GUI visualization DISABLED.")
+            self.get_logger().info("ROI tracking DISABLED.")
 
         if self.publish_debug_image:
             self.get_logger().info("Debug detected image topic PUBLISHED on /apriltag/detected_image.")
         else:
             self.get_logger().info("Debug detected image topic DISABLED.")
+
+        # Register parameter callback so CLI params update GUI / multiscale without restart
+        try:
+            self.add_on_set_parameters_callback(self._on_set_parameters)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     # Utilities
@@ -270,9 +305,6 @@ class AprilTagVisualizationNode(Node):
         """
         Parse a comma-separated list of scales into a list of floats.
 
-        Example:
-            "0.7,1.0,1.4" -> [0.7, 1.0, 1.4]
-
         Guarantees at least [1.0] if parsing fails.
         """
         try:
@@ -280,7 +312,6 @@ class AprilTagVisualizationNode(Node):
             scales = [float(p) for p in parts]
             if not scales:
                 return [1.0]
-            # Remove any non-positive or absurd scales
             scales = [sc for sc in scales if sc > 0.05]
             return scales or [1.0]
         except Exception as e:
@@ -292,7 +323,6 @@ class AprilTagVisualizationNode(Node):
         Create/destroy OpenCV windows and debug publisher according to
         the current parameters. Safe to call multiple times.
         """
-        # Read current parameter values (use get_parameter to reflect runtime changes)
         try:
             enable_gui = self.get_parameter('enable_gui').value
         except Exception:
@@ -348,12 +378,9 @@ class AprilTagVisualizationNode(Node):
         """rclpy parameter callback to react to runtime parameter changes."""
         changed = False
         for p in params:
-            if p.name == 'enable_gui':
-                changed = True
-            elif p.name == 'publish_debug_image':
+            if p.name in ('enable_gui', 'publish_debug_image'):
                 changed = True
             elif p.name == 'multiscale_scales':
-                # reparse scales if changed
                 try:
                     self.multiscale_scales = self._parse_multiscale_scales(p.value)
                 except Exception:
@@ -365,36 +392,34 @@ class AprilTagVisualizationNode(Node):
                 except Exception:
                     pass
                 changed = True
+            elif p.name == 'enable_roi_tracking':
+                try:
+                    self.enable_roi_tracking = bool(p.value)
+                except Exception:
+                    pass
+                changed = True
 
         if changed:
-            # Apply visualization state changes (create/destroy windows/publishers)
             try:
                 self._apply_visualization_settings()
             except Exception as e:
                 self.get_logger().warn(f"Error applying visualization settings: {e}")
 
-        # Always return successful so parameter setting isn't blocked
         result = SetParametersResult()
         result.successful = True
         result.reason = ''
         return result
 
+    # ---------- detection helpers (from apriltag_vis_node_2) ---------- #
+
     def _detect_multiscale(self, gray):
         """
         Run AprilTag detection on multiple image scales and merge results.
-
-        For each scale:
-          - resize the gray image
-          - run detector
-          - rescale all corner / center coordinates back to original image coordinates
-        Then:
-          - deduplicate by tag id, keeping the detection with largest image area.
         """
         h, w = gray.shape[:2]
         all_dets = []
 
         for scale in self.multiscale_scales:
-            # Avoid ridiculous sizes
             new_w = int(w * scale)
             new_h = int(h * scale)
             if new_w < 32 or new_h < 32:
@@ -404,34 +429,111 @@ class AprilTagVisualizationNode(Node):
                 img_scaled = gray
             else:
                 img_scaled = cv2.resize(
-                    gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR
+                    gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC
                 )
 
             dets = self.detector.detect(img_scaled)
             for d in dets:
-                # Shallow copy so we don't mutate original dict from detector
-                d2 = dict(d)
-
-                # Rescale all pixel coordinates back to original image space
+                d2 = dict(d)  # copy
                 for key in ['lb', 'rb', 'rt', 'lt', 'center']:
                     if key in d2:
                         d2[key] = d2[key] / scale
-
                 if 'lb-rb-rt-lt' in d2:
                     d2['lb-rb-rt-lt'] = d2['lb-rb-rt-lt'] / scale
-
-                d2['_scale'] = scale  # optional debug info
+                d2['_scale'] = scale
                 all_dets.append(d2)
 
+        return self._deduplicate_detections(all_dets)
+
+    def _detect_single_with_fallback(self, gray):
+        """Single-scale detect with simple downscale fallback."""
+        detections = self.detector.detect(gray)
+        if detections:
+            return detections
+
+        if gray.shape[0] <= 64 or gray.shape[1] <= 64:
+            return []
+
+        all_dets = []
+        for scale_factor in [0.7, 0.5]:
+            gray_scaled = cv2.resize(
+                gray, None, fx=scale_factor, fy=scale_factor,
+                interpolation=cv2.INTER_LINEAR
+            )
+            dets = self.detector.detect(gray_scaled)
+            for d in dets:
+                d2 = dict(d)
+                inv_scale = 1.0 / scale_factor
+                for key in ['lb', 'rb', 'rt', 'lt', 'center']:
+                    if key in d2:
+                        d2[key] = d2[key] * inv_scale
+                if 'lb-rb-rt-lt' in d2:
+                    d2['lb-rb-rt-lt'] = d2['lb-rb-rt-lt'] * inv_scale
+                all_dets.append(d2)
+
+        return self._deduplicate_detections(all_dets)
+
+    def _detect_in_rois(self, gray):
+        """
+        ROI-first detection: for each tracked tag from previous frames,
+        crop a window around its center, upscale, and run detection there.
+        """
+        if not self.enable_roi_tracking or not self.last_smoothed_tags:
+            return []
+
+        h, w = gray.shape[:2]
+        all_dets = []
+
+        for tag_id, info in self.last_smoothed_tags.items():
+            cx, cy = info['center']
+            cx = int(cx)
+            cy = int(cy)
+
+            half = self.roi_half_size
+            x0 = max(0, cx - half)
+            x1 = min(w, cx + half)
+            y0 = max(0, cy - half)
+            y1 = min(h, cy + half)
+
+            if x1 - x0 < 16 or y1 - y0 < 16:
+                continue
+
+            roi = gray[y0:y1, x0:x1]
+            roi_big = cv2.resize(
+                roi, None,
+                fx=self.roi_upscale,
+                fy=self.roi_upscale,
+                interpolation=cv2.INTER_CUBIC
+            )
+
+            dets = self.detector.detect(roi_big)
+            for d in dets:
+                d2 = dict(d)
+                # map back to original image coordinates
+                for key in ['lb', 'rb', 'rt', 'lt', 'center']:
+                    if key in d2:
+                        d2[key] = d2[key] / self.roi_upscale
+                        d2[key][0] += x0
+                        d2[key][1] += y0
+                if 'lb-rb-rt-lt' in d2:
+                    corners = d2['lb-rb-rt-lt'] / self.roi_upscale
+                    corners[:, 0] += x0
+                    corners[:, 1] += y0
+                    d2['lb-rb-rt-lt'] = corners
+
+                d2['_source'] = 'roi'
+                all_dets.append(d2)
+
+        return self._deduplicate_detections(all_dets)
+
+    def _deduplicate_detections(self, all_dets):
+        """Merge detections by id, preferring larger area & higher margin."""
         if not all_dets:
             return []
 
-        # Deduplicate by tag id: keep the one with largest apparent area
         dedup = {}
         for d in all_dets:
             tag_id = d['id']
-
-            # Estimate area from corners
             if 'lb-rb-rt-lt' in d:
                 corners = d['lb-rb-rt-lt']
             else:
@@ -439,11 +541,58 @@ class AprilTagVisualizationNode(Node):
             xs = corners[:, 0]
             ys = corners[:, 1]
             area = float((xs.max() - xs.min()) * (ys.max() - ys.min()))
+            # Your apriltag lib uses 'margin', not 'decision_margin'
+            dec_margin = float(d.get('decision_margin', d.get('margin', 0.0)))
+            score = area + 5.0 * dec_margin  # heuristic
 
-            if tag_id not in dedup or area > dedup[tag_id]['area']:
-                dedup[tag_id] = {'det': d, 'area': area}
+            if tag_id not in dedup or score > dedup[tag_id]['score']:
+                dedup[tag_id] = {'det': d, 'score': score}
 
         return [v['det'] for v in dedup.values()]
+
+    def _smooth_detections(self, raw_infos):
+        """
+        Temporal smoothing / majority vote for center & distance.
+        Only keep tags with sufficient average decision_margin.
+        """
+        smoothed = []
+
+        for info in raw_infos:
+            tag_id = info['id']
+            history = self.tag_histories.get(tag_id, [])
+            history.append(info)
+            if len(history) > self.max_history:
+                history = history[-self.max_history:]
+            self.tag_histories[tag_id] = history
+
+            xs = [h['center'][0] for h in history]
+            ys = [h['center'][1] for h in history]
+            dists = [h['distance'] for h in history if h['distance'] is not None]
+            margins = [h['decision_margin'] for h in history if h['decision_margin'] is not None]
+
+            med_center = (float(np.median(xs)), float(np.median(ys)))
+            med_dist = float(np.median(dists)) if dists else info['distance']
+            avg_margin = float(np.mean(margins)) if margins else 0.0
+
+            if avg_margin < self.decision_margin_threshold:
+                # reject consistently low-quality detections
+                continue
+
+            info_sm = info.copy()
+            info_sm['center'] = med_center
+            info_sm['distance'] = med_dist
+            info_sm['avg_decision_margin'] = avg_margin
+            smoothed.append(info_sm)
+
+        # update last_smoothed_tags for ROI in next frame
+        self.last_smoothed_tags = {
+            i['id']: {
+                'center': i['center'],
+                'distance': i['distance']
+            } for i in smoothed
+        }
+
+        return smoothed
 
     # ------------------------------------------------------------------ #
     # Main callback
@@ -461,54 +610,31 @@ class AprilTagVisualizationNode(Node):
         # Gray for detection
         gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
 
-        # Preprocessing to enhance small markers at distance (especially after rectification)
-        # Step 1: CLAHE for adaptive local contrast enhancement
-        # Higher clipLimit increases sensitivity to distant small markers
+        # Preprocessing to enhance small markers at distance
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         gray = clahe.apply(gray)
 
-        # Step 2: Subtle unsharp mask to sharpen marker edges without over-processing
-        # This helps AprilTag edge detection without artifacts
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
         gray = cv2.addWeighted(gray, 1.2, blurred, -0.2, 0)
         gray = np.clip(gray, 0, 255).astype(np.uint8)
 
-        # --- Detection: single scale or multiscale ---
-        # For extended range on rectified images, use intelligent fallback strategy
+        # --- ROI-first detection, then full-frame fallback --- #
+        roi_dets = self._detect_in_rois(gray) if self.enable_roi_tracking else []
+
         if self.enable_multiscale:
-            detections = self._detect_multiscale(gray)
+            full_dets = self._detect_multiscale(gray)
         else:
-            # Single scale detection first
-            detections = self.detector.detect(gray)
-            
-            # Aggressive fallback: if nothing detected, try multiple downsampled scales
-            # This is very effective for catching distant small markers
-            if len(detections) == 0 and gray.shape[0] > 64 and gray.shape[1] > 64:
-                # Try progressively smaller scales: 0.7x, 0.5x
-                for scale_factor in [0.7, 0.5]:
-                    gray_scaled = cv2.resize(
-                        gray, None, fx=scale_factor, fy=scale_factor, 
-                        interpolation=cv2.INTER_LINEAR
-                    )
-                    dets = self.detector.detect(gray_scaled)
-                    
-                    if dets:
-                        # Rescale back to original coordinates
-                        inv_scale = 1.0 / scale_factor
-                        for d in dets:
-                            for key in ['lb', 'rb', 'rt', 'lt', 'center']:
-                                if key in d:
-                                    d[key] = d[key] * inv_scale
-                            if 'lb-rb-rt-lt' in d:
-                                d['lb-rb-rt-lt'] = d['lb-rb-rt-lt'] * inv_scale
-                        detections = dets
-                        break  # Stop at first successful scale
+            full_dets = self._detect_single_with_fallback(gray)
+
+        detections = self._deduplicate_detections(roi_dets + full_dets)
 
         detected_vis = rectified.copy()
-
         marker_array_msg = MarkerPoseArray()
         marker_array_msg.header = msg.header
 
+        raw_infos = []
+
+        # First pass: build raw_infos for temporal smoothing
         for d in detections:
             if self.first_detection:
                 self.get_logger().info(f"Detection keys: {d.keys()}")
@@ -534,40 +660,17 @@ class AprilTagVisualizationNode(Node):
                     )
                     continue
 
-                # Draw box (only affects detected_vis, for screenshots / debug)
-                cv2.line(detected_vis, lt, rt, (0, 255, 0), 2)
-                cv2.line(detected_vis, rt, rb, (0, 255, 0), 2)
-                cv2.line(detected_vis, rb, lb, (0, 255, 0), 2)
-                cv2.line(detected_vis, lb, lt, (0, 255, 0), 2)
-
-                # Center
                 center = tuple(d['center'].astype(int))
-                cv2.circle(detected_vis, center, 5, (0, 0, 255), -1)
+                tag_id = int(d['id'])
+                decision_margin = float(d.get('decision_margin', d.get('margin', 0.0)))
 
-                # Label
-                tag_id = d['id']
-                cv2.putText(
-                    detected_vis,
-                    f"{self.tag_family} id={tag_id}",
-                    (lt[0] - 70, lt[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (0, 255, 0), 2
-                )
-
-                # ----------- DEPTH / POSE ESTIMATION ----------------
-                pose_msg = Pose()
-                pose_msg.orientation.w = 1.0
-                distance_value = -1.0
-
+                # Optional PnP just for distance estimate to smooth ROI (pose recomputed later)
+                distance = None
                 try:
-                    # Image points: lt, rt, rb, lb
                     img_pts = np.array([lt, rt, rb, lb], dtype=np.float32)
-
-                    # Camera intrinsics
                     camera_matrix = self.new_K
                     dist_coeffs = np.zeros((4, 1), dtype=np.float32)
 
-                    # 3D tag model
                     s = self.tag_size / 2.0
                     obj_pts = np.array([
                         [-s,  s, 0],
@@ -583,38 +686,107 @@ class AprilTagVisualizationNode(Node):
                     if not success:
                         raise RuntimeError("solvePnP returned False")
 
-                    R, _ = cv2.Rodrigues(rvec)
                     t = tvec.flatten()
-
-                    distance = np.linalg.norm(t)
-                    distance_value = float(distance)
-
-                    pose_msg.position.x = float(t[0])
-                    pose_msg.position.y = float(t[1])
-                    pose_msg.position.z = float(t[2])
-
-                    qx, qy, qz, qw = rotation_matrix_to_quaternion(R)
-                    pose_msg.orientation.x = qx
-                    pose_msg.orientation.y = qy
-                    pose_msg.orientation.z = qz
-                    pose_msg.orientation.w = qw
-
-                    # Optional text overlay in detected_vis only
-                    cv2.putText(
-                        detected_vis,
-                        f"Z={t[2]:.2f}m Dist={distance:.2f}m",
-                        (lt[0] - 55, lt[1] - 25),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 0, 255), 2
-                    )
+                    distance = float(np.linalg.norm(t))
 
                 except Exception as e:
-                    self.get_logger().warn(f"Pose failed (PnP): {e}")
+                    self.get_logger().warn(f"Pose (for distance) failed (PnP): {e}")
+
+                raw_infos.append({
+                    'id': tag_id,
+                    'lt': lt, 'rt': rt, 'rb': rb, 'lb': lb,
+                    'center': center,
+                    'distance': distance,
+                    'decision_margin': decision_margin
+                })
 
             except Exception as e:
                 self.get_logger().error(f"Error processing detection: {e}")
                 continue
 
+        # Temporal smoothing / majority vote (center & distance)
+        smoothed_infos = self._smooth_detections(raw_infos)
+
+        # Second pass: build MarkerPose messages from smoothed infos
+        for info in smoothed_infos:
+            lt = info['lt']
+            rt = info['rt']
+            rb = info['rb']
+            lb = info['lb']
+            cx, cy = info['center']
+            center = (int(cx), int(cy))
+            tag_id = info['id']
+            avg_margin = info.get('avg_decision_margin', 0.0)
+
+            pose_msg = Pose()
+            pose_msg.orientation.w = 1.0
+            distance_value = -1.0
+
+            # Full PnP pose estimation for publishing pose
+            try:
+                img_pts = np.array([lt, rt, rb, lb], dtype=np.float32)
+                camera_matrix = self.new_K
+                dist_coeffs = np.zeros((4, 1), dtype=np.float32)
+
+                s = self.tag_size / 2.0
+                obj_pts = np.array([
+                    [-s,  s, 0],
+                    [ s,  s, 0],
+                    [ s, -s, 0],
+                    [-s, -s, 0]
+                ], dtype=np.float32)
+
+                success, rvec, tvec = cv2.solvePnP(
+                    obj_pts, img_pts, camera_matrix, dist_coeffs
+                )
+
+                if not success:
+                    raise RuntimeError("solvePnP returned False")
+
+                R, _ = cv2.Rodrigues(rvec)
+                t = tvec.flatten()
+                distance = np.linalg.norm(t)
+                distance_value = float(distance)
+
+                pose_msg.position.x = float(t[0])
+                pose_msg.position.y = float(t[1])
+                pose_msg.position.z = float(t[2])
+
+                qx, qy, qz, qw = rotation_matrix_to_quaternion(R)
+                pose_msg.orientation.x = qx
+                pose_msg.orientation.y = qy
+                pose_msg.orientation.z = qz
+                pose_msg.orientation.w = qw
+
+            except Exception as e:
+                self.get_logger().warn(f"Pose failed (PnP): {e}")
+
+            # Draw on visualization image
+            cv2.line(detected_vis, lt, rt, (0, 255, 0), 2)
+            cv2.line(detected_vis, rt, rb, (0, 255, 0), 2)
+            cv2.line(detected_vis, rb, lb, (0, 255, 0), 2)
+            cv2.line(detected_vis, lb, lt, (0, 255, 0), 2)
+
+            cv2.circle(detected_vis, center, 5, (0, 0, 255), -1)
+
+            cv2.putText(
+                detected_vis,
+                f"{self.tag_family} id={tag_id}",
+                (lt[0] - 70, lt[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                (0, 255, 0), 2
+            )
+
+            if distance_value >= 0.0:
+                cv2.putText(
+                    detected_vis,
+                    f"Dist={distance_value:.2f}m M={avg_margin:.1f}",
+                    (lt[0] - 55, lt[1] - 25),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (0, 0, 255), 2
+                )
+
+            # Build MarkerPose message (same format as original node)
             marker_msg = MarkerPose()
             marker_msg.id = int(tag_id)
             marker_msg.pose = pose_msg
@@ -640,7 +812,7 @@ class AprilTagVisualizationNode(Node):
         # Store last annotated image
         self.current_detected = detected_vis.copy()
 
-        # --- NEW: visualization (OpenCV windows) ---
+        # Visualization (OpenCV windows)
         if self.enable_gui:
             try:
                 cv2.imshow("AprilTag Original", self.current_original)
@@ -648,18 +820,16 @@ class AprilTagVisualizationNode(Node):
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('s'):
                     self.save_screenshots()
-                # if key == ord('q'):
-                #     rclpy.shutdown()  # optional, usually just Ctrl+C
             except cv2.error as e:
                 self.get_logger().warn(f"OpenCV GUI error: {e}")
 
-        # --- NEW: publish debug image if requested ---
+        # Publish debug image if requested
         if self.publish_debug_image and self.debug_pub is not None:
             dbg_msg = self.bridge.cv2_to_imgmsg(self.current_detected, encoding='bgr8')
             dbg_msg.header = msg.header
             self.debug_pub.publish(dbg_msg)
 
-        # ----------- inline buffering logic -----------
+        # ----------- Buffering logic (unchanged behaviour) -----------
         if not self.enable_buffer:
             # Old behaviour: publish raw detections
             self.pub.publish(marker_array_msg)
@@ -683,7 +853,7 @@ class AprilTagVisualizationNode(Node):
                 )
                 new_marker = copy.deepcopy(m)
                 new_marker.distance = float(filtered_distance)
-                # we keep the current pose; only distance is smoothed
+                # pose stays current frame
             else:
                 # First time we see this marker
                 new_marker = copy.deepcopy(m)
@@ -727,7 +897,7 @@ def main(args=None):
         action="store_true",
         help="Use experimental hardcoded RAW calibration instead of the default one."
     )
-    # NEW: CLI flag to enable buffer easily
+    # CLI flag to enable buffer
     parser.add_argument(
         "--enable_buffer",
         action="store_true",
@@ -742,9 +912,9 @@ def main(args=None):
         "--multiscale_scales",
         type=str,
         default="1.0",
-        help="Comma-separated list of scales, e.g. '0.7,1.0,1.4'."
+        help="Comma-separated list of scales, e.g. '2.0,1.5,1.0'."
     )
-    # NEW: visualization flags
+    # Visualization flags
     parser.add_argument(
         "--enable_gui",
         action="store_true",
@@ -763,6 +933,7 @@ def main(args=None):
         tag_family=parsed.tag_family,
     )
 
+    # Push CLI flags into ROS params so the node reacts via param callback
     params = []
     if parsed.use_raw:
         params.append(Parameter('use_raw', Parameter.Type.BOOL, True))
@@ -770,7 +941,6 @@ def main(args=None):
         params.append(Parameter('enable_buffer', Parameter.Type.BOOL, True))
     if parsed.enable_multiscale:
         params.append(Parameter('enable_multiscale', Parameter.Type.BOOL, True))
-    # Always push the string, so it matches the param declaration
     params.append(Parameter('multiscale_scales', Parameter.Type.STRING, parsed.multiscale_scales))
     if parsed.enable_gui:
         params.append(Parameter('enable_gui', Parameter.Type.BOOL, True))

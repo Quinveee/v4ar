@@ -9,3 +9,10 @@ marker_map:
   8: [6, 0, 1.5708]
   9: [3, 0, 1.5708]
   10: [0, 0, 1.5708]
+
+axis_markers:
+  axis_0_deg: [5, 7]      # Markers facing 0° (East)
+  axis_90_deg: [8, 9, 10, 1]  # Markers facing 90° (North)
+  axis_180_deg: [2, 3, 4, 6]  # Markers facing 180° (West)
+  axis_270_deg: []        # Markers facing 270° (South)
+

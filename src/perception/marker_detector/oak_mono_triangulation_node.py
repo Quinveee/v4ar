@@ -65,8 +65,8 @@ class TriangulationNode(Node):
         self.declare_parameter('marker_config', 'config/markers.yaml')
         self.declare_parameter('solver_type', 'least_squares')
         self.declare_parameter('use_buffered_markers', False)
-        self.declare_parameter('oak_weight', oak_weight) 
-        self.declare_parameter('mono_weight', mono_weight) 
+        self.declare_parameter('oak_weight', oak_weight)  # NEW: Weight for OAK detections
+        self.declare_parameter('mono_weight', mono_weight)  # NEW: Weight for mono detections
         
         config_path = self.get_parameter('marker_config').value
         solver_type = self.get_parameter('solver_type').value
@@ -89,6 +89,7 @@ class TriangulationNode(Node):
             f"Using triangulation solver: {SolverClass.__name__}")
 
         # --- Detection storage for fusion ---
+        # NEW: Store latest detections from both cameras with timestamps
         self.mono_detections = {}  # {marker_id: (MarkerPose, timestamp)}
         self.oak_detections = {}   # {marker_id: (MarkerPose, timestamp)}
         self.detection_timeout = 0.5  # seconds
@@ -336,17 +337,19 @@ class TriangulationNode(Node):
             }
             
             if len(fused_detections) < 2:
-                self.get_logger().debug(
+                self.get_logger().warn(
                     f"Need at least 2 markers. OAK: {len(self.oak_detections)}, "
-                    f"Mono: {len(self.mono_detections)}"
+                    f"Mono: {len(self.mono_detections)}", 
+                    throttle_duration_sec=2.0
                 )
                 return
             
             # Log detection sources
             oak_ids = [m_id for m_id, _, w in fused_detections if w == self.oak_weight]
             mono_ids = [m_id for m_id, _, w in fused_detections if w == self.mono_weight]
-            self.get_logger().debug(
-                f"Fused detections: OAK={oak_ids}, Mono={mono_ids}"
+            self.get_logger().info(
+                f"Fused detections: OAK={oak_ids}, Mono={mono_ids}",
+                throttle_duration_sec=1.0
             )
             
             # Check if solver supports weights
@@ -401,7 +404,7 @@ class TriangulationNode(Node):
                         yaw = 0.0
 
             # Debug logging
-            self.get_logger().info(f"Triangulated: x={x:.4f}, y={y:.4f}, yaw={yaw:.4f}", throttle_duration_sec=1.0)
+            self.get_logger().info(f"Triangulated: x={x:.4f}, y={y:.4f}, yaw={yaw:.4f}")
 
             pose_msg = PoseStamped()
             pose_msg.header = header

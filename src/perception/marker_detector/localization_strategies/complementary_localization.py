@@ -34,5 +34,16 @@ class ComplementaryLocalization(BaseLocalizationStrategy):
     def update(self, measurement):
         mx = measurement.pose.position.x
         my = measurement.pose.position.y
+        # Extract yaw from quaternion
+        qx = measurement.pose.orientation.x
+        qy = measurement.pose.orientation.y
+        qz = measurement.pose.orientation.z
+        qw = measurement.pose.orientation.w
+        mtheta = quaternion_to_yaw(qx, qy, qz, qw)
+
         self.x = (1 - self.alpha) * self.x + self.alpha * mx
         self.y = (1 - self.alpha) * self.y + self.alpha * my
+        # Fuse theta with angle wrapping
+        theta_diff = mtheta - self.theta
+        theta_diff = math.atan2(math.sin(theta_diff), math.cos(theta_diff))
+        self.theta = self.theta + self.alpha * theta_diff

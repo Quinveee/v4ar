@@ -9,51 +9,16 @@ from geometry_msgs.msg import PoseStamped
 from ament_index_python.packages import get_package_share_directory
 import os
 import math
-from scipy.spatial.transform import Rotation as R
+from .utils import compute_yaw_from_apriltag, compute_average_yaw_from_markers
 
-# Import solvers
+
 from .solvers.weighted_least_squares import WeightedLeastSquaresSolver
 from .solvers.new_solver import LeastSquaresSolver
 
 SOLVER_CLASSES = {
     'least_squares': LeastSquaresSolver,
-    'weighted': WeightedLeastSquaresSolver,
+    'weighted': LeastSquaresSolver
 }
-
-def compute_yaw_from_apriltag(tag_msg, marker_map):
-    """
-    Compute robot yaw based on:
-    - tag orientation in camera frame (tag_msg.pose.orientation)
-    - known tag orientation in world frame (marker_map[id][2])
-    """
-
-    # 1. Rotation matrix from tag → camera
-    q = [
-        tag_msg.pose.orientation.x,
-        tag_msg.pose.orientation.y,
-        tag_msg.pose.orientation.z,
-        tag_msg.pose.orientation.w
-    ]
-    R_ct = R.from_quat(q).as_matrix()
-
-    # 2. Tag normal direction in camera frame (tag's +Z axis)
-    tag_normal_cam = R_ct @ np.array([0, 0, 1.0])
-
-    # 3. Camera → tag direction (reverse normal)
-    cam_to_tag = -tag_normal_cam
-
-    # 4. Bearing angle to tag in camera/robot frame
-    cam_yaw_to_tag = math.atan2(cam_to_tag[1], cam_to_tag[0])
-
-    # 5. Tag yaw in world frame (from YAML config)
-    _, _, tag_yaw_world = marker_map[tag_msg.id]
-
-    # 6. Robot yaw = difference
-    yaw_robot = tag_yaw_world - cam_yaw_to_tag
-
-    # Normalize
-    return math.atan2(math.sin(yaw_robot), math.cos(yaw_robot))
-
 
 # -------------------------------------------------------
 #  NODE
@@ -102,11 +67,13 @@ class TriangulationNode(Node):
         # input_topic = '/detected_markers'
         # input_topic = '/oak/detected_markers'
         self.sub = self.create_subscription(
-            MarkerPoseArray, input_topic, self.marker_callback, 10
+            MarkerPoseArray, "/oak/detected_markers", self.marker_callback, 10
         )
         self.get_logger().info(f"Subscribed to marker topic: {input_topic}")
 
         self.pub = self.create_publisher(PoseStamped, '/robot_pose_raw', 10)
+
+        self.yaw = 0
 
 
     # -----------------------------------------------------
@@ -156,11 +123,16 @@ class TriangulationNode(Node):
             else:
                 x, y = result
 
-            # Compute orientation from axis markers (if available) or fallback to closest tag
-            yaw = self._compute_orientation_from_axes(msg, x, y)
-
+            # Compute orientation from average of all visible markers
+            yaw = compute_average_yaw_from_markers(x, y, msg.markers, self.marker_map)
+            self.get_logger().info(f"Yaw from markers: {yaw}")
+            if yaw is None:
+                self.get_logger().warn("No yaw computed, using previous yaw")
+                yaw = self.yaw
+            self.yaw = yaw
+            #yaw -= math.pi / 4
             # Smooth orientation using buffer
-            yaw = self._smooth_orientation(yaw, msg)
+            #yaw = self._smooth_orientation(yaw, msg)
 
             # Construct message
             pose_msg = PoseStamped()
@@ -179,7 +151,7 @@ class TriangulationNode(Node):
             self.pub.publish(pose_msg)
 
             self.get_logger().info(
-                f"Robot pose: x={x:.2f}, y={y:.2f}, yaw={math.degrees(yaw):.1f} deg"
+                f"Robot pose: x={x:.2f}, y={y:.2f}, yaw rad={yaw:.2f}, yaw={math.degrees(yaw):.1f} deg"
             )
 
         except Exception as e:

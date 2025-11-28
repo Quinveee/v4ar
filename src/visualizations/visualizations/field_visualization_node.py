@@ -231,6 +231,7 @@ class FieldVisualizationNode(Node):
         # Latest pose & detections
         self.latest_pose: PoseStamped | None = None
         self.latest_markers = []
+        self.latest_oak_markers = []
 
         # --- Subscriptions ---
         # Determine the marker topic: explicit `marker_topic` param wins,
@@ -244,6 +245,8 @@ class FieldVisualizationNode(Node):
             PoseStamped, self.pose_topic, self.pose_callback, 10)
         self.markers_sub = self.create_subscription(
             MarkerPoseArray, marker_topic, self.markers_callback, 10)
+        self.oak_markers_sub = self.create_subscription(
+            MarkerPoseArray, "/oak/detected_markers", self.oak_markers_callback, 10)
         self.latest_vector = None
         self.vector_sub = self.create_subscription(
             Vector3,
@@ -253,7 +256,7 @@ class FieldVisualizationNode(Node):
         )
 
         self.get_logger().info(
-            f"FieldVisualization listening to pose: {self.pose_topic}, markers: {marker_topic}")
+            f"FieldVisualization listening to pose: {self.pose_topic}, markers: {marker_topic}, oak_markers: /oak/detected_markers")
 
         # --- Timer for rendering ---
         self.timer = self.create_timer(0.1, self.render)  # 10 Hz
@@ -294,6 +297,9 @@ class FieldVisualizationNode(Node):
 
     def markers_callback(self, msg: MarkerPoseArray):
         self.latest_markers = msg.markers
+
+    def oak_markers_callback(self, msg: MarkerPoseArray):
+        self.latest_oak_markers = msg.markers
 
     def vector_callback(self, msg: Vector3):
         self.latest_vector = (msg.x, msg.y)
@@ -406,6 +412,57 @@ class FieldVisualizationNode(Node):
             radius_px = int(m.distance * 1000.0 * avg_px_per_mm)
             if radius_px > 0 and radius_px < 5000:  # avoid crazy values
                 cv2.circle(img, (mu, mv), radius_px, (128, 128, 255), 1)
+
+    def draw_oak_marker_ranges_from_rover(self, img, rover_u, rover_v):
+        """Draw lines from rover to each OAK detected marker in oak brown color."""
+        if not self.latest_oak_markers:
+            return
+
+        # Oak brown color (BGR format): a nice brown shade
+        oak_brown = (19, 69, 139)  # RGB(139, 69, 19) = Saddle Brown
+
+        for m in self.latest_oak_markers:
+            if m.id not in self.marker_map:
+                continue
+
+            mx_m, my_m, _ = self.marker_map[m.id]
+            x_mm = mx_m * 1000.0
+            y_mm = my_m * 1000.0
+            mu, mv = self.world_to_pixel(x_mm, y_mm)
+
+            # line from rover -> marker in oak brown
+            cv2.line(img, (rover_u, rover_v), (mu, mv), oak_brown, 2)
+
+            # distance label around the midpoint of the line
+            mid_u = int((rover_u + mu) / 2)
+            mid_v = int((rover_v + mv) / 2)
+
+            # Black outline for text
+            cv2.putText(
+                img,
+                f"OAK {m.id} : {m.distance:.2f} m",
+                (mid_u + 5, mid_v + 15),  # Offset slightly down from regular markers
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                3,
+            )
+            # Oak brown text
+            cv2.putText(
+                img,
+                f"OAK {m.id} : {m.distance:.2f} m",
+                (mid_u + 5, mid_v + 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                oak_brown,
+                1,
+            )
+
+            # Optional: draw distance circle around marker in oak brown
+            avg_px_per_mm = 0.5 * (self.px_per_mm_x + self.px_per_mm_y)
+            radius_px = int(m.distance * 1000.0 * avg_px_per_mm)
+            if radius_px > 0 and radius_px < 5000:  # avoid crazy values
+                cv2.circle(img, (mu, mv), radius_px, oak_brown, 1)
 
     def draw_heading_vector(self, img, rover_u, rover_v):
         if self.latest_vector is None:
@@ -555,9 +612,15 @@ class FieldVisualizationNode(Node):
         # Draw lines + distance annotations to visible markers
         self.draw_marker_ranges_from_rover(field, rover_u, rover_v)
 
+        # Draw lines + distance annotations to OAK detected markers (in oak brown)
+        self.draw_oak_marker_ranges_from_rover(field, rover_u, rover_v)
+
         # Also show which marker IDs are currently seen
         visible_ids = [
             m.id for m in self.latest_markers if m.id in self.marker_map]
+        oak_visible_ids = [
+            m.id for m in self.latest_oak_markers if m.id in self.marker_map]
+
         cv2.putText(
             field,
             f"Visible markers: {visible_ids}",
@@ -567,6 +630,18 @@ class FieldVisualizationNode(Node):
             (255, 255, 255),
             2,
         )
+
+        # Show OAK markers if any
+        if oak_visible_ids:
+            cv2.putText(
+                field,
+                f"OAK markers: {oak_visible_ids}",
+                (20, self.field_h - 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (19, 69, 139),  # Oak brown
+                2,
+            )
 
         cv2.imshow("Rover on Field", field)
 

@@ -11,6 +11,18 @@ from collections import deque
 from .base_strategy import BaseLocalizationStrategy
 
 
+def quaternion_to_yaw(x, y, z, w):
+    """Convert quaternion to yaw angle in radians."""
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return np.arctan2(siny_cosp, cosy_cosp)
+
+
+def normalize_angle(angle):
+    """Normalize angle to [-pi, pi]."""
+    return np.arctan2(np.sin(angle), np.cos(angle))
+
+
 class AdaptiveKalmanLocalization(BaseLocalizationStrategy):
     """
     Adaptive Kalman filter localization strategy.
@@ -47,9 +59,9 @@ class AdaptiveKalmanLocalization(BaseLocalizationStrategy):
         # State covariance
         self.P = np.eye(3) * 0.1
 
-        # Base noise parameters
+        # Base noise parameters (x, y, theta)
         self.Q_base = np.diag([0.02, 0.02, 0.01]) * process_noise_scale
-        self.R_base = np.diag([measurement_noise_base, measurement_noise_base])
+        self.R_base = np.diag([measurement_noise_base, measurement_noise_base, 0.02])
 
         # Adaptive parameters
         self.R = self.R_base.copy()
@@ -75,6 +87,7 @@ class AdaptiveKalmanLocalization(BaseLocalizationStrategy):
         self.x += v * np.cos(self.theta) * dt
         self.y += v * np.sin(self.theta) * dt
         self.theta += w * dt
+        self.theta = normalize_angle(self.theta)
 
         # Jacobian of motion model w.r.t. state
         F = np.array([
@@ -94,18 +107,31 @@ class AdaptiveKalmanLocalization(BaseLocalizationStrategy):
         - Outliers (very large innovations)
         - Degraded measurement quality (consistent large innovations)
         """
-        # Extract measurement
-        z = np.array([measurement.pose.position.x, measurement.pose.position.y])
+        # Extract measurement including theta from quaternion
+        qx = measurement.pose.orientation.x
+        qy = measurement.pose.orientation.y
+        qz = measurement.pose.orientation.z
+        qw = measurement.pose.orientation.w
+        measured_theta = quaternion_to_yaw(qx, qy, qz, qw)
 
-        # Measurement model: H maps state to measurement space
-        H = np.array([[1, 0, 0],
-                      [0, 1, 0]])
+        z = np.array([
+            measurement.pose.position.x,
+            measurement.pose.position.y,
+            measured_theta
+        ])
+
+        # Measurement model: H maps state to measurement space (full state observation)
+        H = np.eye(3)
+
+        # Current state
+        state = np.array([self.x, self.y, self.theta])
 
         # Predicted measurement
-        z_pred = H @ np.array([self.x, self.y, self.theta])
+        z_pred = H @ state
 
-        # Innovation (residual)
+        # Innovation (residual) with angle wrapping for theta
         innovation = z - z_pred
+        innovation[2] = normalize_angle(innovation[2])
 
         # Innovation covariance
         S = H @ self.P @ H.T + self.R
@@ -190,6 +216,7 @@ class AdaptiveKalmanLocalization(BaseLocalizationStrategy):
         self.x += state_update[0]
         self.y += state_update[1]
         self.theta += state_update[2]
+        self.theta = normalize_angle(self.theta)
 
         # Update covariance
         self.P = (np.eye(3) - K @ H) @ self.P

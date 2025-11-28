@@ -10,7 +10,7 @@ setup(
     packages=find_packages(
         where='.',  # search in current dir
         include=['marker_detector', "*marker_detector*",'line_detector', '*detector*', 'odometry', '*odometry*', 'launch', 'config',
-                 "launch", "*launch*"]
+                 "launch", "*launch*", "perception", "perception.*"]
     ),
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
@@ -20,7 +20,7 @@ setup(
         (os.path.join('share', package_name, 'launch', 'odometry'), glob(os.path.join('launch', 'odometry_*.py'))),
         (os.path.join('share', package_name, 'config', 'odometry'), glob(os.path.join('config', 'odometry_*.yaml'))),
     ],
-    install_requires=['setuptools', "pupil-apriltags"],
+    install_requires=['setuptools'],
     zip_safe=True,
     maintainer='root',
     maintainer_email='quintenengelen@gmail.com',
@@ -38,10 +38,11 @@ setup(
             'field_visualization = visualizations.field_visualization_node:main',
             'robust_localization = marker_detector.robust_localization_node:main',
             'apriltag = marker_detector.apriltag_detector:main',
-            'oak_apriltag= marker_detector.oak_apriltag_detector:main',
+            'oak_apriltag = marker_detector.oak_apriltag_detector:main',
             'localization = marker_detector.localization:main',
             'odometry_node = odometry.odometry:main',
             'oak_mono_triangulation = marker_detector.oak_mono_triangulation_node:main',
+            'triangulation_uni = marker_detector.triangulation_uni:main'
         ],
     },
 )

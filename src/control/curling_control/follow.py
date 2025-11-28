@@ -16,13 +16,16 @@ from .navigation_strategies import (
     BaseNavigationStrategy,
     PotentialFieldStrategy,
     DirectGoalStrategy,
-    DWAStrategy
+    DWAStrategy,
+    IntegratedYawDirectGoalStrategy,
 )
 
 # Registry of available strategies
 AVAILABLE_STRATEGIES = {
     "potential_field": PotentialFieldStrategy,
     "direct_goal": DirectGoalStrategy,
+    "integrated_yaw_direct_goal": IntegratedYawDirectGoalStrategy,
+    "direct_goal_integrated_yaw": IntegratedYawDirectGoalStrategy,
     "dwa": DWAStrategy,
 }
 
@@ -62,7 +65,7 @@ class NavigationWithAvoidanceNode(Node):
 
         # Declare ROS parameters with defaults
         self.declare_parameter("strategy_type", "dwa")
-        self.declare_parameter("target_x", 0.0)
+        self.declare_parameter("target_x", 1.0)
         self.declare_parameter("target_y", 3.0)
         self.declare_parameter("safe_distance", 1.2)
         self.declare_parameter("repulse_strength", 1.5)

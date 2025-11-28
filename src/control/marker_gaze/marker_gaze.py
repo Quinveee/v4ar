@@ -5,6 +5,7 @@ from sensor_msgs.msg import Image, JointState
 from perception_msgs.msg import MarkerPoseArray
 from .gaze_strategies.weighed_gaze_strategy import WeightedGazeStrategy
 from .gaze_strategies.vibe_gaze_strategy import ActiveSearchGazeStrategy
+import argparse
 
 STRATEGIES = {
     "weighted": WeightedGazeStrategy,
@@ -13,13 +14,13 @@ STRATEGIES = {
 
 
 class MarkerGazeNode(Node):
-    def __init__(self):
+    def __init__(self, pan: float = 0.5, tilt: float = 0.2):
         super().__init__("marker_gaze")
 
         # --- Parameters ---
         self.declare_parameter("strategy_type", "weighted")
-        self.declare_parameter("kp_pan", 0.5)
-        self.declare_parameter("kp_tilt", 0.2)
+        self.declare_parameter("kp_pan", pan)
+        self.declare_parameter("kp_tilt", tilt)
 
         self.strategy_type = self.get_parameter("strategy_type").value
         self.kp_pan = self.get_parameter("kp_pan").value
@@ -90,13 +91,19 @@ class MarkerGazeNode(Node):
             joint_msg.position = [float(pan_angle), float(tilt_angle)]
 
             self.joint_pub.publish(joint_msg)
-            self.get_logger().info(
-                f"Published joint command: pan={pan_angle:.4f}, tilt={tilt_angle:.4f}")
+            # self.get_logger().info(
+            #     f"Published joint command: pan={pan_angle:.4f}, tilt={tilt_angle:.4f}")
 
 
 def main(args=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--pan', type=float, default=0.5, help='Proportional gain for pan control')
+    parser.add_argument(
+        '--tilt', type=float, default=0.2, help='Proportional gain for tilt control')
+    parsed_args, unknown = parser.parse_known_args(args=args)
     rclpy.init(args=args)
-    node = MarkerGazeNode()
+    node = MarkerGazeNode(pan=parsed_args.pan, tilt=parsed_args.tilt)
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
