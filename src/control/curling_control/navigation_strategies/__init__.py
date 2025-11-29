@@ -8,6 +8,7 @@ from .integrated_yaw_direct_goal import IntegratedYawDirectGoalStrategy
 # from .viewpoint_strategy import ViewpointStrategy
 from .discretized_strategy import GridDirectGoalStrategy
 from .discretized_obstacle_strategy import GridDirectGoalStrategyObstacle
+from .discrete_forcefield import GridPotentialFieldStrategy
 
 __all__ = [
     "BaseNavigationStrategy",
@@ -18,5 +19,6 @@ __all__ = [
     # "ViewpointStrategy",
     "GridDirectGoalStrategy",
     "GridDirectGoalStrategyObstacle",
+    "GridPotentialFieldStrategy",
     ""
 ]

@@ -1,12 +1,16 @@
+#!/usr/bin/env python3
 """
-Potential Field Navigation Strategy.
+Enhanced Potential Field Navigation Strategy with Safe Local Minimum Detection.
 
-This strategy uses artificial potential fields for navigation:
-- Attractive force pulls the robot toward the goal
-- Repulsive forces push the robot away from obstacles
+This strategy:
+- Uses attractive and repulsive potential fields for navigation.
+- Detects local minima (robot stuck without making progress).
+- Adds small random perturbations to escape local minima.
+- Ignores false detections during initialization or near the goal.
 """
 
 import math
+import time
 import numpy as np
 from typing import List, Tuple, Optional
 from geometry_msgs.msg import Twist, Vector3
@@ -14,12 +18,7 @@ from .base_strategy import BaseNavigationStrategy
 
 
 class PotentialFieldStrategy(BaseNavigationStrategy):
-    """
-    Navigation strategy using artificial potential fields.
-
-    The robot is attracted to the goal and repelled by obstacles.
-    The combined force field determines the desired heading direction.
-    """
+    """Navigation using artificial potential fields + robust local minimum recovery."""
 
     def __init__(
         self,
@@ -29,20 +28,15 @@ class PotentialFieldStrategy(BaseNavigationStrategy):
         max_linear_velocity: float = 0.1,
         angular_gain: float = 0.5,
         min_speed_scale: float = 0.1,
-        *args, 
+        progress_threshold: float = 0.02,    # min distance progress (m)
+        stuck_time_threshold: float = 2.0,   # seconds before considered stuck
+        noise_strength: float = 0.3,         # magnitude of random perturbation
+        *args,
         **kwargs
     ):
-        """
-        Initialize the potential field strategy.
+        super().__init__()
 
-        Args:
-            safe_distance: Distance threshold for obstacle repulsion (meters)
-            repulse_strength: Strength of repulsive force from obstacles
-            goal_tolerance: Distance threshold to consider goal reached (meters)
-            max_linear_velocity: Maximum forward velocity (m/s)
-            angular_gain: Proportional gain for angular velocity control
-            min_speed_scale: Minimum speed scaling factor when avoiding obstacles
-        """
+        # Core parameters
         self.safe_distance = safe_distance
         self.repulse_strength = repulse_strength
         self.goal_tolerance = goal_tolerance
@@ -50,6 +44,18 @@ class PotentialFieldStrategy(BaseNavigationStrategy):
         self.angular_gain = angular_gain
         self.min_speed_scale = min_speed_scale
 
+        # Local minimum detection
+        self.progress_threshold = progress_threshold
+        self.stuck_time_threshold = stuck_time_threshold
+        self.noise_strength = noise_strength
+
+        # Internal tracking
+        self.prev_goal_distance = None
+        self.last_progress_time = time.time()
+        self.is_stuck = False
+        self.initialized = False
+
+    # ------------------------------------------------------------------
     def compute_control(
         self,
         robot_x: float,
@@ -59,70 +65,106 @@ class PotentialFieldStrategy(BaseNavigationStrategy):
         target_y: float,
         obstacles: List[Tuple[float, float]]
     ) -> Tuple[Twist, Optional[Vector3], bool]:
-        """Compute control using potential field method."""
+        """Compute velocity command using potential field method."""
 
-        # Check if goal is reached
+        # 1. Goal check
         if self.is_goal_reached(robot_x, robot_y, target_x, target_y):
             cmd = Twist()
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-            return (cmd, None, True)
+            return cmd, None, True
 
-        # 1. Compute attractive force toward goal
+        # 2. Compute attractive vector toward goal
         dx = target_x - robot_x
         dy = target_y - robot_y
-
         goal_vec = np.array([dx, dy])
-        goal_vec_norm = goal_vec / (np.linalg.norm(goal_vec) + 1e-6)
+        goal_distance = np.linalg.norm(goal_vec)
+        goal_vec_norm = goal_vec / (goal_distance + 1e-6)
 
-        # 2. Compute repulsive forces from obstacles
-        repulse_sum = np.array([0.0, 0.0])
-
+        # 3. Compute repulsive forces from obstacles
+        repulse_sum = np.zeros(2)
         for ox, oy in obstacles:
             vx = robot_x - ox
             vy = robot_y - oy
-            distance = math.sqrt(vx*vx + vy*vy)
-
+            distance = math.hypot(vx, vy)
             if distance < self.safe_distance:
                 direction_norm = np.array([vx, vy]) / (distance + 1e-6)
-                strength = self.repulse_strength * (1.0 / (distance*distance + 1e-6))
+                strength = self.repulse_strength / (distance**2 + 1e-6)
                 repulse_sum += direction_norm * strength
 
-        # 3. Combine forces
+        # 4. Combine forces
         combined = goal_vec_norm + repulse_sum
+
+        # --- 5. LOCAL MINIMUM DETECTION ---
+        current_time = time.time()
+
+        # Initialize the first distance measurement safely
+        if not self.initialized:
+            self.prev_goal_distance = goal_distance
+            self.last_progress_time = current_time
+            self.initialized = True
+        else:
+            # Only detect local minima if far enough from goal
+            if goal_distance > self.goal_tolerance * 2:
+                delta = self.prev_goal_distance - goal_distance
+
+                # No significant progress → possible stuck
+                if delta < self.progress_threshold:
+                    if current_time - self.last_progress_time > self.stuck_time_threshold:
+                        if not self.is_stuck:
+                            self.is_stuck = True
+                            print("⚠️ [PotentialField] Local minimum detected — injecting noise.")
+                        # Inject small random noise to break equilibrium
+                        noise = np.random.uniform(-self.noise_strength, self.noise_strength, size=2)
+                        combined += noise
+                else:
+                    # Reset timer if progress was made
+                    self.last_progress_time = current_time
+                    self.is_stuck = False
+
+            else:
+                # Near goal — don't trigger stuck behavior
+                self.is_stuck = False
+                self.last_progress_time = current_time
+
+            # Update stored goal distance
+            self.prev_goal_distance = goal_distance
+
+        # 6. Normalize combined vector
         combined_norm = combined / (np.linalg.norm(combined) + 1e-6)
 
-        # 4. Compute desired heading
+        # 7. Desired heading
         target_heading = math.atan2(combined_norm[1], combined_norm[0])
 
-        # 5. Compute heading error
+        # 8. Heading error and angular velocity
         heading_error = self._angle_diff(target_heading, robot_yaw)
-
-        # 6. Compute angular velocity
         angular_velocity = self.angular_gain * heading_error
 
-        # 7. Compute linear velocity with obstacle-based scaling
+        # 9. Linear velocity (reduced near strong repulsion)
         repulse_mag = np.linalg.norm(repulse_sum)
         speed_scale = max(self.min_speed_scale, 1.0 - repulse_mag)
         linear_velocity = self.max_linear_velocity * speed_scale
 
-        # 8. Create Twist message
+        # 10. Compose velocity command
         cmd = Twist()
         cmd.linear.x = linear_velocity
         cmd.angular.z = angular_velocity
 
-        # 9. Create heading vector for visualization
+        # 11. Visualization heading vector
         heading_vec = Vector3()
         heading_vec.x = combined_norm[0]
         heading_vec.y = combined_norm[1]
         heading_vec.z = 0.0
 
-        return (cmd, heading_vec, False)
+        return cmd, heading_vec, False
 
-    def reset(self) -> None:
-        """Reset strategy state (no internal state to reset for this strategy)."""
-        pass
+    # ------------------------------------------------------------------
+    def reset(self):
+        """Reset internal state."""
+        self.prev_goal_distance = None
+        self.last_progress_time = time.time()
+        self.is_stuck = False
+        self.initialized = False
 
+    # ------------------------------------------------------------------
     def is_goal_reached(
         self,
         robot_x: float,
@@ -133,29 +175,33 @@ class PotentialFieldStrategy(BaseNavigationStrategy):
         """Check if robot is within goal tolerance."""
         dx = target_x - robot_x
         dy = target_y - robot_y
-        distance = math.sqrt(dx*dx + dy*dy)
-        return distance < self.goal_tolerance
+        return math.hypot(dx, dy) < self.goal_tolerance
 
+    # ------------------------------------------------------------------
     def get_parameters(self) -> dict:
         """Get current strategy parameters."""
         return {
-            'safe_distance': self.safe_distance,
-            'repulse_strength': self.repulse_strength,
-            'goal_tolerance': self.goal_tolerance,
-            'max_linear_velocity': self.max_linear_velocity,
-            'angular_gain': self.angular_gain,
-            'min_speed_scale': self.min_speed_scale
+            "safe_distance": self.safe_distance,
+            "repulse_strength": self.repulse_strength,
+            "goal_tolerance": self.goal_tolerance,
+            "max_linear_velocity": self.max_linear_velocity,
+            "angular_gain": self.angular_gain,
+            "min_speed_scale": self.min_speed_scale,
+            "progress_threshold": self.progress_threshold,
+            "stuck_time_threshold": self.stuck_time_threshold,
+            "noise_strength": self.noise_strength,
         }
 
-    def set_parameters(self, params: dict) -> None:
-        """Update strategy parameters."""
+    # ------------------------------------------------------------------
+    def set_parameters(self, params: dict):
+        """Update strategy parameters dynamically."""
         for key, value in params.items():
             if hasattr(self, key):
                 setattr(self, key, value)
 
+    # ------------------------------------------------------------------
     @staticmethod
     def _angle_diff(a: float, b: float) -> float:
-        """Compute the shortest angular difference between two angles."""
+        """Compute shortest angular difference between two angles."""
         d = a - b
         return math.atan2(math.sin(d), math.cos(d))
-
