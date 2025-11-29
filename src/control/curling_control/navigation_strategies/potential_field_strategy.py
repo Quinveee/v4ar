@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Enhanced Potential Field Navigation Strategy with Local Minimum Detection.
 
@@ -9,6 +10,7 @@ This strategy:
 """
 
 import math
+import time
 import numpy as np
 from typing import List, Tuple, Optional
 from geometry_msgs.msg import Twist, Vector3
@@ -66,13 +68,18 @@ class PotentialFieldStrategy(BaseNavigationStrategy):
         if self.is_goal_reached(robot_x, robot_y, target_x, target_y):
             cmd = Twist()
             return cmd, None, True
+            return cmd, None, True
 
         # 2. Compute attractive force toward goal
         dx, dy = target_x - robot_x, target_y - robot_y
         goal_vec = np.array([dx, dy])
         goal_distance = np.linalg.norm(goal_vec)
         goal_vec_norm = goal_vec / (goal_distance + 1e-6)
+        goal_distance = np.linalg.norm(goal_vec)
+        goal_vec_norm = goal_vec / (goal_distance + 1e-6)
 
+        # 3. Compute repulsive forces from obstacles
+        repulse_sum = np.zeros(2)
         # 3. Compute repulsive forces from obstacles
         repulse_sum = np.zeros(2)
         for ox, oy in obstacles:
@@ -81,8 +88,10 @@ class PotentialFieldStrategy(BaseNavigationStrategy):
             if distance < self.safe_distance:
                 direction_norm = np.array([vx, vy]) / (distance + 1e-6)
                 strength = self.repulse_strength / (distance**2 + 1e-6)
+                strength = self.repulse_strength / (distance**2 + 1e-6)
                 repulse_sum += direction_norm * strength
 
+        # 4. Combine forces
         # 4. Combine forces
         combined = goal_vec_norm + repulse_sum
 
@@ -155,9 +164,24 @@ class PotentialFieldStrategy(BaseNavigationStrategy):
         return math.hypot(dx, dy) < self.goal_tolerance
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     def get_parameters(self) -> dict:
         """Get current strategy parameters."""
         return {
+            "safe_distance": self.safe_distance,
+            "repulse_strength": self.repulse_strength,
+            "goal_tolerance": self.goal_tolerance,
+            "max_linear_velocity": self.max_linear_velocity,
+            "angular_gain": self.angular_gain,
+            "min_speed_scale": self.min_speed_scale,
+            "progress_threshold": self.progress_threshold,
+            "stuck_time_threshold": self.stuck_time_threshold,
+            "noise_strength": self.noise_strength,
+        }
+
+    # ------------------------------------------------------------------
+    def set_parameters(self, params: dict):
+        """Update strategy parameters dynamically."""
             "safe_distance": self.safe_distance,
             "repulse_strength": self.repulse_strength,
             "goal_tolerance": self.goal_tolerance,
@@ -177,8 +201,10 @@ class PotentialFieldStrategy(BaseNavigationStrategy):
                 setattr(self, key, value)
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     @staticmethod
     def _angle_diff(a: float, b: float) -> float:
+        """Compute shortest angular difference between two angles."""
         """Compute shortest angular difference between two angles."""
         d = a - b
         return math.atan2(math.sin(d), math.cos(d))

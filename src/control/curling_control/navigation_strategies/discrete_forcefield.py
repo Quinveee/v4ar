@@ -1,40 +1,38 @@
+#!/usr/bin/env python3
 """
-Grid-based Direct Goal Navigation Strategy (global/local version).
+Hybrid Grid + Potential Field Navigation Strategy.
 
 High-level idea
 ---------------
-- Discretize the field into a regular grid.
-- Maintain a *global* shortest path over that grid from the robot's
-  current grid cell to the goal cell (A* over free cells).
-- Obstacles are projected into grid cells; we *vote* for these cells
-  over time to build a persistent obstacle map:
-    * a cell that is detected many times becomes "confirmed" and
-      remains blocked,
-    * single-frame noise does not immediately block the grid.
-- The controller only ever drives toward the *next* cell on that global
-  grid path (local controller).
-- At each grid cell boundary, the robot stops (and optionally dwells),
-  then the global path is recomputed using the latest obstacle info.
+- Maintain a *global* shortest path over a discrete grid (A* over free cells).
+- Maintain a *persistent* obstacle map with voting (rover detections stick
+  around but noise gets forgotten).
+- Use a *local potential field* controller to generate smooth motion commands:
+    * attractive field toward:
+        - the next grid cell along the global path (local guidance),
+        - the final goal (global bias),
+    * repulsive field from:
+        - confirmed obstacle cells on the grid (persistent),
+        - raw obstacle detections (fast reaction).
+- Detect local minima / "stuck" conditions (not making progress toward goal)
+  and inject small random perturbations into the potential field to escape.
 
-Obstacle handling (this version)
---------------------------------
-- We receive raw obstacle positions as (x, y) in world coordinates
-  from follower.py.
-- Each step:
-    * we convert detections to grid cells,
-    * each cell gets a vote (up to a max),
-    * cells age if not seen,
-    * once a cell is seen enough times (votes >= confirm threshold),
-      it becomes a persistent obstacle,
-    * old cells are forgotten after some time.
-- This reduces jitter and prevents a single rover from "painting" an
-  entire ring of obstacles around the robot as it rotates.
+So you get:
+- Global + local grid decisions (A* + next-cell path guidance),
+- Persistent grid obstacles,
+- Potential-field style smooth motion with local minimum escape.
+
+This class is intended as a drop-in alternative to:
+- PotentialFieldStrategy
+- GridDirectGoalStrategyObstacle
 """
 
 import math
 import heapq
+import time
 from typing import List, Tuple, Optional, Dict, Set
 
+import numpy as np
 from geometry_msgs.msg import Twist, Vector3
 
 from .base_strategy import BaseNavigationStrategy
@@ -48,108 +46,130 @@ FIELD_WIDTH: float = 6.0   # along +x
 FIELD_LENGTH: float = 9.0  # along +y
 
 
-class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
+class GridPotentialFieldStrategy(BaseNavigationStrategy):
     """
-    Grid-based navigation strategy that:
-      - computes a global A* path over a grid,
-      - follows it cell-by-cell with a DirectGoal sub-controller,
-      - re-plans whenever we reach a new cell or obstacles change,
-      - uses a voting-based obstacle grid to persist detections across time.
+    Hybrid grid + potential field navigation strategy.
+
+    - Uses a grid and persistent obstacle voting just like
+      GridDirectGoalStrategyObstacle.
+    - Uses a potential-field style controller (like PotentialFieldStrategy)
+      to generate local commands, biased by the global A* path.
     """
 
     def __init__(
         self,
+        # --- global / grid params ---
         goal_tolerance: float = 0.1,
         max_linear_velocity: float = 0.2,
-        angular_gain: float = 1.0,
+        angular_gain: float = 0.8,
         min_angular_error_for_forward: float = 0.3,  # ~17 degrees
         grid_resolution: float = 0.5,
         obstacle_inflation_radius: float = 0.0,
-        waypoint_tolerance: float = 0.25,             # kept for compatibility
-        dwell_time_at_waypoint: float = 0.0,          # seconds
         control_dt: float = 0.05,
         log_throttle_steps: int = 20,
+
+        # --- potential field params ---
+        safe_distance: float = 1.2,
+        repulse_strength: float = 1.5,
+        min_speed_scale: float = 0.1,
+        path_attract_weight: float = 1.0,
+        goal_attract_weight: float = 0.4,
+
+        # --- local minimum detection ---
+        progress_threshold: float = 0.02,   # m progress threshold
+        stuck_time_threshold: float = 2.0,  # seconds before considered stuck
+        noise_strength: float = 0.3,        # magnitude of random perturbation
+
         *args,
         **kwargs,
     ):
         """
-        Args:
-            goal_tolerance: Distance threshold to consider goal reached.
-            max_linear_velocity: Forward velocity when moving.
-            angular_gain: P-gain for angular velocity control.
-            min_angular_error_for_forward: Heading error threshold under
-                which we allow forward motion.
-            grid_resolution: Size (meters) of each grid cell.
-            obstacle_inflation_radius: Extra radius around obstacles; all
-                cells within that radius are blocked. This implementation
-                clamps it so that at most a 1-cell radius is inflated
-                (i.e. at most a 3x3 patch around a rover).
-            waypoint_tolerance: Retained for API compatibility; not used
-                in the new cell-based logic.
-            dwell_time_at_waypoint: Pause duration at each intermediate
-                cell (0.0 means "no dwell" but we still briefly stop and
-                re-plan).
-            control_dt: Control-loop dt for converting dwell time to
-                discrete steps (should match follower.py timer).
-            log_throttle_steps: How many control steps between log
-                prints (>=1).
+        Args (most important):
+            goal_tolerance: distance at which we declare the goal reached.
+            max_linear_velocity: forward speed scale.
+            angular_gain: P-gain for orienting toward the resultant field vector.
+            min_angular_error_for_forward: if |heading_error| is larger
+                than this, we stop linear motion and just rotate.
+            grid_resolution: size of each grid cell in meters.
+            obstacle_inflation_radius: inflation of blocked cells (clamped
+                to at most 1-cell radius).
+            safe_distance: radius within which obstacles generate repulsive
+                forces in the potential field.
+            repulse_strength: coefficient for repulsive forces.
+            min_speed_scale: minimum speed factor when repulsed.
+            path_attract_weight: weight for attraction toward the next
+                grid cell along the global path.
+            goal_attract_weight: extra attraction toward the final goal.
+            progress_threshold, stuck_time_threshold, noise_strength:
+                parameters for local minimum detection and escape.
         """
-        # --- primary control params ---
+        # ------------------------
+        # primary control params
+        # ------------------------
         self.goal_tolerance = goal_tolerance
         self.max_linear_velocity = max_linear_velocity
         self.angular_gain = angular_gain
         self.min_angular_error_for_forward = min_angular_error_for_forward
 
-        # --- grid geometry ---
+        # ------------------------
+        # grid geometry
+        # ------------------------
         self.grid_resolution = grid_resolution
         self.nx = max(1, int(FIELD_WIDTH / grid_resolution))
         self.ny = max(1, int(FIELD_LENGTH / grid_resolution))
 
-        # Clamp inflation so each rover can't blow away half the field
-        # (at most a 1-cell radius, i.e. 3x3 patch). With the default
-        # obstacle_inflation_radius=0.0, each rover blocks exactly ONE
-        # grid cell.
         clamped_inflation = min(
             max(0.0, obstacle_inflation_radius),
-            1.01 * self.grid_resolution,  # at most 1 cell radius
+            1.01 * self.grid_resolution,  # at most a 1-cell radius
         )
         self.obstacle_inflation_radius = clamped_inflation
 
-        # --- dwell behavior ---
-        self.waypoint_tolerance = waypoint_tolerance
-        self.dwell_time_at_waypoint = dwell_time_at_waypoint
         self.control_dt = control_dt
-        self.dwell_steps_required = (
-            int(dwell_time_at_waypoint / control_dt)
-            if dwell_time_at_waypoint > 0.0
-            else 0
-        )
-        self._reset_dwell_state()
 
-        # --- global path state ---
+        # ------------------------
+        # potential field params
+        # ------------------------
+        self.safe_distance = safe_distance
+        self.repulse_strength = repulse_strength
+        self.min_speed_scale = min_speed_scale
+        self.path_attract_weight = path_attract_weight
+        self.goal_attract_weight = goal_attract_weight
+
+        # local minimum detection
+        self.progress_threshold = progress_threshold
+        self.stuck_time_threshold = stuck_time_threshold
+        self.noise_strength = noise_strength
+        self.prev_goal_distance: Optional[float] = None
+        self.last_progress_time: float = time.time()
+        self.is_stuck: bool = False
+
+        # ------------------------
+        # global path state
+        # ------------------------
         self._global_path_cells: List[Tuple[int, int]] = []
         self._global_path_valid: bool = False
         self._last_planning_start_cell: Optional[Tuple[int, int]] = None
         self._last_planning_goal_cell: Optional[Tuple[int, int]] = None
         self._last_planning_blocked: Set[Tuple[int, int]] = set()
 
-        # --- local target state (adjacent cell along global path) ---
+        # local target (cell on path)
         self._current_target_index: Optional[int] = None
         self._current_target_cell: Optional[Tuple[int, int]] = None
         self._current_target_center: Optional[Tuple[float, float]] = None
 
-        # --- obstacle voting grid ---
-        # Each entry: cell -> {"votes": int, "age": int}
-        # votes: how many times this cell has been detected
-        # age: how many steps since last detection
+        # ------------------------
+        # obstacle voting grid
+        # ------------------------
+        # cell -> {"votes": int, "age": int}
         self._obstacle_cells: Dict[Tuple[int, int], Dict[str, int]] = {}
 
-        # Voting parameters (can be tuned)
-        self.obstacle_confirm_votes: int = 5          # how many votes to confirm a cell
-        self.obstacle_max_age_steps: int = 200        # steps before forgetting a cell (~10s at 20 Hz)
-        self.obstacle_max_votes: int = 50             # cap on vote count to avoid overflow
+        self.obstacle_confirm_votes: int = 5          # votes to confirm a cell
+        self.obstacle_max_age_steps: int = 200        # steps before forgetting (~10s at 20 Hz)
+        self.obstacle_max_votes: int = 50             # cap votes
 
-        # --- debug / logging ---
+        # ------------------------
+        # debug / logging
+        # ------------------------
         self.log_throttle_steps = max(1, log_throttle_steps)
         self._step_counter: int = 0
 
@@ -161,30 +181,18 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         self._debug_last_target_center: Optional[Tuple[float, float]] = None
 
         print(
-            f"[GridDirectGoalStrategyObstacle] Init: grid_resolution={self.grid_resolution:.2f}m, "
+            f"[GridPotentialFieldStrategy] Init: grid_resolution={self.grid_resolution:.2f}m, "
             f"nx={self.nx}, ny={self.ny}, goal_tolerance={self.goal_tolerance:.2f}, "
-            f"dwell={self.dwell_time_at_waypoint:.2f}s "
-            f"({self.dwell_steps_required} steps), "
+            f"safe_distance={self.safe_distance:.2f}m, "
             f"obstacle_inflation_radius={self.obstacle_inflation_radius:.2f}m"
         )
 
     # ------------------------------------------------------------------
-    # Dwell helpers
-    # ------------------------------------------------------------------
-
-    def _reset_dwell_state(self) -> None:
-        self._in_dwell: bool = False
-        self._dwell_steps_done: int = 0
-
-    # ------------------------------------------------------------------
-    # Obstacle voting grid helpers
+    # Utility: world <-> grid
     # ------------------------------------------------------------------
 
     def _world_to_cell(self, x: float, y: float) -> Tuple[int, int]:
-        """
-        Map world coordinates (meters) to integer grid cell indices (ix, iy).
-        ix: 0..nx-1 (x direction), iy: 0..ny-1 (y direction).
-        """
+        """Map world coordinates (meters) to integer grid cell indices (ix, iy)."""
         xr = min(max(x, 0.0), FIELD_WIDTH - 1e-6)
         yr = min(max(y, 0.0), FIELD_LENGTH - 1e-6)
 
@@ -193,14 +201,10 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
 
         ix = max(0, min(self.nx - 1, ix))
         iy = max(0, min(self.ny - 1, iy))
-
         return ix, iy
 
     def _cell_to_world(self, ix: int, iy: int) -> Tuple[float, float]:
-        """
-        Map grid cell indices (ix, iy) to the world coordinates of the cell
-        center (x, y).
-        """
+        """Map grid cell indices (ix, iy) to the world coordinates of the cell center."""
         x = (ix + 0.5) * self.grid_resolution
         y = (iy + 0.5) * self.grid_resolution
 
@@ -208,22 +212,23 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         y = min(max(y, 0.0), FIELD_LENGTH)
         return x, y
 
-    def _update_obstacle_votes(
-        self, raw_obstacles: List[Tuple[float, float]]
-    ) -> None:
+    # ------------------------------------------------------------------
+    # Obstacle voting grid
+    # ------------------------------------------------------------------
+
+    def _update_obstacle_votes(self, raw_obstacles: List[Tuple[float, float]]) -> None:
         """
         Update the voting grid with the latest raw obstacle detections.
 
-        - Each detected obstacle (x, y) is mapped to a cell (ix, iy).
-        - That cell's vote count is incremented (up to a cap).
-        - All cells age by 1 each step; cells not seen for too long are
-          removed.
+        - All existing cells age by 1.
+        - Cells that are detected get a vote increment and age reset.
+        - Cells that have not been seen for too long are removed.
         """
-        # Age all existing cells
+        # Age all existing
         for rec in self._obstacle_cells.values():
             rec["age"] += 1
 
-        # Increment votes for cells seen in this step
+        # Increment votes for newly seen cells
         for (ox, oy) in raw_obstacles:
             ix, iy = self._world_to_cell(ox, oy)
             cell = (ix, iy)
@@ -232,9 +237,9 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
                 self._obstacle_cells[cell] = {"votes": 1, "age": 0}
             else:
                 rec["votes"] = min(rec["votes"] + 1, self.obstacle_max_votes)
-                rec["age"] = 0  # reset age when seen
+                rec["age"] = 0
 
-        # Remove cells that are too old (not seen recently)
+        # Remove old cells
         to_delete: List[Tuple[int, int]] = []
         for cell, rec in self._obstacle_cells.items():
             if rec["age"] > self.obstacle_max_age_steps:
@@ -247,15 +252,10 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         """
         Convert the voting grid into a set of blocked cells.
 
-        A cell is blocked if:
-          - it has votes >= obstacle_confirm_votes, and
-          - it hasn't been aged out.
-
-        If obstacle_inflation_radius > 0, we also block neighboring cells
-        within that radius (clamped to at most 1 cell radius).
+        A cell is blocked if it has votes >= obstacle_confirm_votes.
+        If obstacle_inflation_radius > 0, block neighbors within that radius.
         """
         blocked: Set[Tuple[int, int]] = set()
-
         if not self._obstacle_cells:
             return blocked
 
@@ -263,7 +263,7 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
 
         for (ix, iy), rec in self._obstacle_cells.items():
             if rec["votes"] < self.obstacle_confirm_votes:
-                continue  # not yet confirmed as a persistent obstacle
+                continue
 
             if inflation_cells <= 0:
                 blocked.add((ix, iy))
@@ -278,11 +278,11 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         return blocked
 
     # ------------------------------------------------------------------
-    # Path planning (A*)
+    # A* grid planner (global path)
     # ------------------------------------------------------------------
 
     def _neighbors(self, ix: int, iy: int) -> List[Tuple[int, int]]:
-        """8-connected neighborhood in the grid."""
+        """8-connected neighborhood."""
         nbrs: List[Tuple[int, int]] = []
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
@@ -301,7 +301,7 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         return math.hypot(bx - ax, by - ay)
 
     def _heuristic(self, a: Tuple[int, int], b: Tuple[int, int]) -> float:
-        """Heuristic for A* (Euclidean distance)."""
+        """Heuristic for A* (Euclidean)."""
         return self._dist_cells(a, b)
 
     def _plan_path(
@@ -318,7 +318,7 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
             return [start_cell]
 
         if goal_cell in blocked:
-            print("[GridDirectGoalStrategyObstacle] Goal cell is blocked; no grid path.")
+            print("[GridPotentialFieldStrategy] Goal cell is blocked; no grid path.")
             return []
 
         open_set: List[Tuple[float, Tuple[int, int]]] = []
@@ -339,7 +339,7 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
             closed.add(current)
 
             if current == goal_cell:
-                # reconstruct path
+                # reconstruct
                 path = [current]
                 while current in came_from:
                     current = came_from[current]
@@ -350,6 +350,7 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
             for nb in self._neighbors(*current):
                 if nb in blocked:
                     continue
+
                 tentative_g = g_score[current] + self._dist_cells(current, nb)
 
                 if nb not in g_score or tentative_g < g_score[nb]:
@@ -358,7 +359,7 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
                     f_score[nb] = tentative_g + self._heuristic(nb, goal_cell)
                     heapq.heappush(open_set, (f_score[nb], nb))
 
-        print("[GridDirectGoalStrategyObstacle] A* failed to find a path.")
+        print("[GridPotentialFieldStrategy] A* failed to find a path.")
         return []
 
     # ------------------------------------------------------------------
@@ -392,7 +393,6 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
     ) -> None:
         """Run A* and store the global path (or mark invalid if none)."""
         path = self._plan_path(start_cell, goal_cell, blocked)
-
         if not path:
             self._global_path_cells = []
             self._global_path_valid = False
@@ -400,7 +400,7 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
             self._current_target_cell = None
             self._current_target_center = None
             if self._step_counter % self.log_throttle_steps == 0:
-                print("[GridDirectGoalStrategyObstacle] No grid path; stopping.")
+                print("[GridPotentialFieldStrategy] No grid path; falling back to pure potential field.")
             return
 
         self._global_path_cells = path
@@ -409,7 +409,6 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         self._last_planning_goal_cell = goal_cell
         self._last_planning_blocked = set(blocked)
 
-        # reset local target; will be re-selected below
         self._current_target_index = None
         self._current_target_cell = None
         self._current_target_center = None
@@ -418,8 +417,8 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
             preview_cells = path[:5]
             preview_world = [self._cell_to_world(ix, iy) for (ix, iy) in preview_cells]
             print(
-                f"[GridDirectGoalStrategyObstacle] Replanned global path with "
-                f"{len(path)} cells. Start={start_cell}, goal={goal_cell}, "
+                f"[GridPotentialFieldStrategy] Replanned global path with {len(path)} cells. "
+                f"Start={start_cell}, goal={goal_cell}, "
                 f"preview_world={[(round(px,2), round(py,2)) for (px,py) in preview_world]}"
             )
 
@@ -430,7 +429,6 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         if cell in path:
             return path.index(cell)
 
-        # Not exactly on the path; pick nearest cell in path
         best_idx = 0
         best_dist = float("inf")
         cx, cy = self._cell_to_world(*cell)
@@ -445,9 +443,13 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
     def _update_local_target(
         self,
         start_cell: Tuple[int, int],
-        goal_cell: Tuple[int, int],
     ) -> None:
-        """Choose the next cell on the global path as the local target."""
+        """
+        Choose the next cell on the global path as the local target.
+
+        If we're at or past the final cell, we keep the last cell as target
+        and let the potential field use the true goal as well.
+        """
         if not self._global_path_valid or not self._global_path_cells:
             self._current_target_index = None
             self._current_target_cell = None
@@ -457,18 +459,134 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         idx_on_path = self._index_of_cell_in_path(start_cell, self._global_path_cells)
 
         if idx_on_path >= len(self._global_path_cells) - 1:
-            # Already at (or beyond) the final cell; we treat this as the
-            # "goal cell" case and let DirectGoal refine to the true goal.
             self._current_target_index = idx_on_path
         else:
-            # Local target is the next cell on the path
             self._current_target_index = idx_on_path + 1
 
         self._current_target_cell = self._global_path_cells[self._current_target_index]
         self._current_target_center = self._cell_to_world(*self._current_target_cell)
 
     # ------------------------------------------------------------------
-    # Core control
+    # Potential field controller with grid + raw obstacles
+    # ------------------------------------------------------------------
+
+    def _compute_potential_field_control(
+        self,
+        robot_x: float,
+        robot_y: float,
+        robot_yaw: float,
+        goal_x: float,
+        goal_y: float,
+        blocked_cells: Set[Tuple[int, int]],
+        raw_obstacles: List[Tuple[float, float]],
+        local_path_target: Optional[Tuple[float, float]],
+    ) -> Tuple[Twist, Vector3, bool]:
+        """
+        Compute a potential-field-based control.
+
+        Attractive:
+            - toward final goal (goal_x, goal_y)
+            - optionally toward local_path_target (next cell center on grid path)
+        Repulsive:
+            - from confirmed obstacle cells (grid)
+            - from raw obstacle detections (world coords)
+        """
+        # --- attractive toward goal + path target ---
+        pos = np.array([robot_x, robot_y], dtype=float)
+
+        goal_vec = np.array([goal_x - robot_x, goal_y - robot_y], dtype=float)
+        goal_dist = np.linalg.norm(goal_vec)
+        goal_dir = goal_vec / (goal_dist + 1e-6)
+
+        attract = self.goal_attract_weight * goal_dir
+
+        if local_path_target is not None:
+            lx, ly = local_path_target
+            path_vec = np.array([lx - robot_x, ly - robot_y], dtype=float)
+            path_dist = np.linalg.norm(path_vec)
+            if path_dist > 1e-4:
+                path_dir = path_vec / path_dist
+                attract += self.path_attract_weight * path_dir
+
+        # --- repulsive forces from grid obstacles ---
+        repulse = np.zeros(2, dtype=float)
+
+        for (ix, iy) in blocked_cells:
+            ox, oy = self._cell_to_world(ix, iy)
+            o_vec = pos - np.array([ox, oy], dtype=float)
+            dist = np.linalg.norm(o_vec)
+            if dist < 1e-6:
+                continue
+            if dist < self.safe_distance:
+                direction = o_vec / dist
+                strength = self.repulse_strength / (dist**2 + 1e-6)
+                repulse += direction * strength
+
+        # --- repulsive forces from raw obstacles (fast response) ---
+        for (ox, oy) in raw_obstacles:
+            o_vec = pos - np.array([ox, oy], dtype=float)
+            dist = np.linalg.norm(o_vec)
+            if dist < 1e-6:
+                continue
+            if dist < self.safe_distance:
+                direction = o_vec / dist
+                strength = self.repulse_strength / (dist**2 + 1e-6)
+                repulse += direction * strength
+
+        combined = attract + repulse
+
+        # --- local minimum detection & noise injection (like PotentialFieldStrategy) ---
+        current_time = time.time()
+        if self.prev_goal_distance is not None:
+            delta = self.prev_goal_distance - goal_dist
+            if delta < self.progress_threshold:
+                # not making significant progress
+                if current_time - self.last_progress_time > self.stuck_time_threshold:
+                    if not self.is_stuck:
+                        self.is_stuck = True
+                        print(
+                            "[GridPotentialFieldStrategy] Local minimum detected — injecting noise."
+                        )
+                    noise = np.random.uniform(
+                        -self.noise_strength, self.noise_strength, size=2
+                    )
+                    combined += noise
+            else:
+                # made progress
+                self.last_progress_time = current_time
+                self.is_stuck = False
+
+        self.prev_goal_distance = goal_dist
+
+        # --- normalize resultant vector ---
+        combined_norm = combined / (np.linalg.norm(combined) + 1e-6)
+
+        target_heading = math.atan2(combined_norm[1], combined_norm[0])
+        heading_error = self._angle_diff(target_heading, robot_yaw)
+
+        angular_velocity = self.angular_gain * heading_error
+
+        repulse_mag = float(np.linalg.norm(repulse))
+        speed_scale = max(self.min_speed_scale, 1.0 - repulse_mag)
+        linear_velocity = self.max_linear_velocity * speed_scale
+
+        # Optional: don't move forward if heading error is large
+        if abs(heading_error) > self.min_angular_error_for_forward:
+            linear_velocity = 0.0
+
+        cmd = Twist()
+        cmd.linear.x = linear_velocity
+        cmd.angular.z = angular_velocity
+
+        heading_vec = Vector3()
+        heading_vec.x = combined_norm[0]
+        heading_vec.y = combined_norm[1]
+        heading_vec.z = 0.0
+
+        return cmd, heading_vec, False
+
+    # ------------------------------------------------------------------
+    # Main control entry point
     # ------------------------------------------------------------------
 
     def compute_control(
@@ -479,35 +597,39 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         target_x: float,
         target_y: float,
         obstacles: List[Tuple[float, float]],
-    ):
+    ) -> Tuple[Twist, Optional[Vector3], bool]:
         """
         Main control:
-          1. Check if within goal_tolerance -> stop & return goal_reached=True.
+          1. Check if within goal_tolerance -> stop & goal_reached=True.
           2. Update obstacle voting grid with raw obstacles.
           3. Convert voting grid to blocked cells.
           4. Convert robot & goal to start/goal cells.
           5. Re-plan global grid path if needed.
-          6. Pick adjacent cell along that path as local target.
-          7. If local target cell == goal cell -> DirectGoal to true goal.
-          8. Else drive towards local target cell center.
-          9. When we ENTER that cell, stop/dwell, then mark the global
-             path invalid so next cycle re-plans with updated obstacles.
+          6. Select next cell on global path as local target.
+          7. Use potential field (goal + local target + obstacles) to compute
+             control command.
+          8. If no global path exists, fall back to pure potential field
+             (goal + obstacles, no path target).
         """
         self._step_counter += 1
 
-        # --- 1. Check *true* goal distance (no internal latch here) ---
+        # --- 1. Check true goal distance ---
         if self.is_goal_reached(robot_x, robot_y, target_x, target_y):
             if self._step_counter % self.log_throttle_steps == 0:
                 print(
-                    f"[GridDirectGoalStrategyObstacle] Goal reached at "
+                    f"[GridPotentialFieldStrategy] Goal reached at "
                     f"({robot_x:.2f},{robot_y:.2f}) ~ ({target_x:.2f},{target_y:.2f})"
                 )
             cmd = Twist()
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
-            return cmd, None, True
+            heading_vec = Vector3()
+            heading_vec.x = 0.0
+            heading_vec.y = 0.0
+            heading_vec.z = 0.0
+            return cmd, heading_vec, True
 
-        # --- 2. Raw obstacles -> voting grid ---
+        # --- 2. Update obstacle voting grid ---
         self._update_obstacle_votes(obstacles)
 
         # --- 3. Voting grid -> blocked cells ---
@@ -526,154 +648,46 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         if self._should_replan(start_cell, goal_cell, blocked_cells):
             self._replan_global_path(start_cell, goal_cell, blocked_cells)
 
-        # If planning failed, stop but don't claim goal reached
-        if not self._global_path_valid or not self._global_path_cells:
-            cmd = Twist()
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-            # debug
-            self._debug_last_path_cells = []
-            self._debug_last_start_cell = start_cell
-            self._debug_last_goal_cell = goal_cell
-            self._debug_last_target_cell = None
-            self._debug_last_target_center = None
-            return cmd, None, False
+        # --- 6. Determine local path target (if any) ---
+        local_target_center: Optional[Tuple[float, float]] = None
+        if self._global_path_valid and self._global_path_cells:
+            self._update_local_target(start_cell)
+            if self._current_target_cell is not None:
+                local_target_center = self._current_target_center
 
-        # --- 6. Choose local target cell along global path ---
-        self._update_local_target(start_cell, goal_cell)
-
-        if self._current_target_cell is None or self._current_target_center is None:
-            # Shouldn't happen, but be safe
-            cmd = Twist()
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-            return cmd, None, False
-
-        target_cell = self._current_target_cell
-        waypoint_x, waypoint_y = self._current_target_center
-
-        # Debug bookkeeping
+        # debug info
         self._debug_last_path_cells = list(self._global_path_cells)
         self._debug_last_start_cell = start_cell
         self._debug_last_goal_cell = goal_cell
-        self._debug_last_target_cell = target_cell
-        self._debug_last_target_center = (waypoint_x, waypoint_y)
+        self._debug_last_target_cell = self._current_target_cell
+        self._debug_last_target_center = local_target_center
 
         if self._step_counter % self.log_throttle_steps == 0:
             print(
-                f"[GridDirectGoalStrategyObstacle] robot=({robot_x:.2f},{robot_y:.2f}), "
+                f"[GridPotentialFieldStrategy] robot=({robot_x:.2f},{robot_y:.2f}), "
                 f"target=({target_x:.2f},{target_y:.2f}), "
                 f"start_cell={start_cell}, goal_cell={goal_cell}, "
                 f"blocked_cells={len(blocked_cells)}, "
-                f"obstacle_cells={len(self._obstacle_cells)}"
+                f"obstacle_cells={len(self._obstacle_cells)}, "
+                f"have_path={self._global_path_valid}"
             )
-            print(
-                f"[GridDirectGoalStrategyObstacle] local target cell={target_cell}, "
-                f"center=({waypoint_x:.2f},{waypoint_y:.2f})"
-            )
+            if local_target_center is not None:
+                print(
+                    f"[GridPotentialFieldStrategy] local target cell={self._current_target_cell}, "
+                    f"center=({local_target_center[0]:.2f},{local_target_center[1]:.2f})"
+                )
 
-        in_target_cell = (start_cell == target_cell)
-        is_final_cell = (target_cell == goal_cell)
-
-        # --- 7. Final cell -> DirectGoal to the *true* goal pose ---
-        if is_final_cell:
-            cmd, heading_vec, _ = self._direct_goal_control(
-                robot_x, robot_y, robot_yaw, target_x, target_y
-            )
-            return cmd, heading_vec, False
-
-        # --- 8. Intermediate cell: reached? then stop & (optionally) dwell ---
-        if in_target_cell:
-            heading_vec = Vector3()
-            heading_vec.x = 0.0
-            heading_vec.y = 0.0
-            heading_vec.z = 0.0
-
-            if self.dwell_steps_required > 0:
-                if not self._in_dwell:
-                    self._in_dwell = True
-                    self._dwell_steps_done = 0
-                    print(
-                        f"[GridDirectGoalStrategyObstacle] Entered cell={target_cell}, "
-                        f"center=({waypoint_x:.2f},{waypoint_y:.2f}), "
-                        f"starting dwell for {self.dwell_steps_required} steps."
-                    )
-
-                self._dwell_steps_done += 1
-
-                if self._dwell_steps_done >= self.dwell_steps_required:
-                    print(
-                        f"[GridDirectGoalStrategyObstacle] Finished dwell at cell={target_cell}. "
-                        f"Will re-plan next cycle."
-                    )
-                    self._reset_dwell_state()
-                    # force re-plan next call (new start cell + updated obstacles)
-                    self._global_path_valid = False
-
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0
-                return cmd, heading_vec, False
-
-            else:
-                # No dwell requested: still stop once, then re-plan next cycle
-                if self._step_counter % self.log_throttle_steps == 0:
-                    print(
-                        f"[GridDirectGoalStrategyObstacle] Reached cell={target_cell}, "
-                        f"center=({waypoint_x:.2f},{waypoint_y:.2f}), "
-                        f"stopping and forcing re-plan (no dwell)."
-                    )
-                self._global_path_valid = False
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0
-                return cmd, heading_vec, False
-
-        # If we're not in the target cell, ensure dwell state is cleared
-        if self._in_dwell:
-            self._reset_dwell_state()
-
-        # --- 9. Drive toward local target cell center (DirectGoal-style) ---
-        cmd, heading_vec, _ = self._direct_goal_control(
-            robot_x, robot_y, robot_yaw, waypoint_x, waypoint_y
+        # --- 7 & 8. Potential field control (with or without path target) ---
+        cmd, heading_vec, _ = self._compute_potential_field_control(
+            robot_x=robot_x,
+            robot_y=robot_y,
+            robot_yaw=robot_yaw,
+            goal_x=target_x,
+            goal_y=target_y,
+            blocked_cells=blocked_cells,
+            raw_obstacles=obstacles,
+            local_path_target=local_target_center,
         )
-        return cmd, heading_vec, False
-
-    # ------------------------------------------------------------------
-    # Direct-goal-like sub-controller
-    # ------------------------------------------------------------------
-
-    def _direct_goal_control(
-        self,
-        robot_x: float,
-        robot_y: float,
-        robot_yaw: float,
-        target_x: float,
-        target_y: float,
-    ):
-        """Orient toward target, then move forward when heading error small."""
-        dx = target_x - robot_x
-        dy = target_y - robot_y
-
-        target_heading = math.atan2(dy, dx)
-        heading_error = self._angle_diff(target_heading, robot_yaw)
-
-        angular_velocity = self.angular_gain * heading_error
-        linear_velocity = (
-            self.max_linear_velocity
-            if abs(heading_error) < self.min_angular_error_for_forward
-            else 0.0
-        )
-
-        cmd = Twist()
-        cmd.linear.x = linear_velocity
-        cmd.angular.z = angular_velocity
-
-        heading_vec = Vector3()
-        heading_vec.x = math.cos(target_heading)
-        heading_vec.y = math.sin(target_heading)
-        heading_vec.z = 0.0
-
         return cmd, heading_vec, False
 
     # ------------------------------------------------------------------
@@ -682,20 +696,28 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
 
     def reset(self) -> None:
         """Reset internal state."""
-        print("[GridDirectGoalStrategyObstacle] Reset called.")
-        self._step_counter = 0
-        self._reset_dwell_state()
+        print("[GridPotentialFieldStrategy] Reset called.")
 
+        self._step_counter = 0
+
+        # potential-field local-min state
+        self.prev_goal_distance = None
+        self.last_progress_time = time.time()
+        self.is_stuck = False
+
+        # global path state
         self._global_path_cells = []
         self._global_path_valid = False
         self._last_planning_start_cell = None
         self._last_planning_goal_cell = None
         self._last_planning_blocked.clear()
 
+        # local target
         self._current_target_index = None
         self._current_target_cell = None
         self._current_target_center = None
 
+        # debug
         self._debug_last_blocked_cells.clear()
         self._debug_last_path_cells = []
         self._debug_last_start_cell = None
@@ -703,7 +725,7 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         self._debug_last_target_cell = None
         self._debug_last_target_center = None
 
-        # Clear obstacle voting grid
+        # obstacle voting grid
         self._obstacle_cells.clear()
 
     def is_goal_reached(
@@ -720,22 +742,31 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         return distance < self.goal_tolerance
 
     def get_parameters(self) -> dict:
-        """Return current tunable parameters (for debugging / dynamic reconfig)."""
+        """Return current tunable parameters."""
         return {
+            # global / grid
             "goal_tolerance": self.goal_tolerance,
             "max_linear_velocity": self.max_linear_velocity,
             "angular_gain": self.angular_gain,
             "min_angular_error_for_forward": self.min_angular_error_for_forward,
             "grid_resolution": self.grid_resolution,
             "obstacle_inflation_radius": self.obstacle_inflation_radius,
-            "waypoint_tolerance": self.waypoint_tolerance,
-            "dwell_time_at_waypoint": self.dwell_time_at_waypoint,
             "control_dt": self.control_dt,
             "nx": self.nx,
             "ny": self.ny,
             "obstacle_confirm_votes": self.obstacle_confirm_votes,
             "obstacle_max_age_steps": self.obstacle_max_age_steps,
             "obstacle_max_votes": self.obstacle_max_votes,
+            # potential field
+            "safe_distance": self.safe_distance,
+            "repulse_strength": self.repulse_strength,
+            "min_speed_scale": self.min_speed_scale,
+            "path_attract_weight": self.path_attract_weight,
+            "goal_attract_weight": self.goal_attract_weight,
+            # local minimum detection
+            "progress_threshold": self.progress_threshold,
+            "stuck_time_threshold": self.stuck_time_threshold,
+            "noise_strength": self.noise_strength,
         }
 
     def set_parameters(self, params: dict) -> None:
@@ -743,44 +774,39 @@ class GridDirectGoalStrategyObstacle(BaseNavigationStrategy):
         for key, value in params.items():
             if not hasattr(self, key):
                 continue
+
             setattr(self, key, value)
 
             if key == "grid_resolution":
                 self.nx = max(1, int(FIELD_WIDTH / self.grid_resolution))
                 self.ny = max(1, int(FIELD_LENGTH / self.grid_resolution))
                 print(
-                    f"[GridDirectGoalStrategyObstacle] grid_resolution updated to "
+                    f"[GridPotentialFieldStrategy] grid_resolution updated to "
                     f"{self.grid_resolution:.2f}, nx={self.nx}, ny={self.ny}"
                 )
-                # force re-plan with new grid
                 self._global_path_valid = False
 
             if key == "obstacle_inflation_radius":
-                # Re-apply clamping when updated at runtime
                 clamped_inflation = min(
                     max(0.0, self.obstacle_inflation_radius),
                     1.01 * self.grid_resolution,
                 )
                 self.obstacle_inflation_radius = clamped_inflation
                 print(
-                    f"[GridDirectGoalStrategyObstacle] obstacle_inflation_radius set to "
+                    f"[GridPotentialFieldStrategy] obstacle_inflation_radius set to "
                     f"{self.obstacle_inflation_radius:.2f}m"
                 )
 
-            if key in ("dwell_time_at_waypoint", "control_dt"):
-                self.dwell_steps_required = (
-                    int(self.dwell_time_at_waypoint / self.control_dt)
-                    if self.dwell_time_at_waypoint > 0.0
-                    else 0
-                )
+            if key in ("progress_threshold", "stuck_time_threshold", "noise_strength"):
                 print(
-                    f"[GridDirectGoalStrategyObstacle] dwell_time={self.dwell_time_at_waypoint:.2f}s, "
-                    f"control_dt={self.control_dt:.3f}s -> "
-                    f"dwell_steps_required={self.dwell_steps_required}"
+                    "[GridPotentialFieldStrategy] Updated local-minimum parameters: "
+                    f"progress_threshold={self.progress_threshold:.3f}, "
+                    f"stuck_time_threshold={self.stuck_time_threshold:.2f}s, "
+                    f"noise_strength={self.noise_strength:.2f}"
                 )
 
     # ------------------------------------------------------------------
-    # Debug / visualization API
+    # Debug / visualization
     # ------------------------------------------------------------------
 
     def get_debug_info(self) -> dict:

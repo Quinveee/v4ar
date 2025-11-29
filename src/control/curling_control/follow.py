@@ -24,6 +24,7 @@ from .navigation_strategies import (
     # ViewpointStrategy,
     GridDirectGoalStrategy,
     GridDirectGoalStrategyObstacle,
+    GridPotentialFieldStrategy,
 )
 
 # Registry of available strategies
@@ -36,6 +37,7 @@ AVAILABLE_STRATEGIES = {
     # "viewpoint": ViewpointStrategy,
     "discretized": GridDirectGoalStrategy,
     "discretized_obstacle": GridDirectGoalStrategyObstacle,
+    "grid_potential_field": GridPotentialFieldStrategy,
 }
 
 
