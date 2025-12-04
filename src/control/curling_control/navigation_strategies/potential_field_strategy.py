@@ -182,29 +182,14 @@ class PotentialFieldStrategy(BaseNavigationStrategy):
     # ------------------------------------------------------------------
     def set_parameters(self, params: dict):
         """Update strategy parameters dynamically."""
-            "safe_distance": self.safe_distance,
-            "repulse_strength": self.repulse_strength,
-            "goal_tolerance": self.goal_tolerance,
-            "max_linear_velocity": self.max_linear_velocity,
-            "angular_gain": self.angular_gain,
-            "min_speed_scale": self.min_speed_scale,
-            "progress_threshold": self.progress_threshold,
-            "stuck_time_threshold": self.stuck_time_threshold,
-            "noise_strength": self.noise_strength,
-        }
-
-    # ------------------------------------------------------------------
-    def set_parameters(self, params: dict):
-        """Update strategy parameters dynamically."""
         for key, value in params.items():
             if hasattr(self, key):
                 setattr(self, key, value)
 
     # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
     @staticmethod
     def _angle_diff(a: float, b: float) -> float:
         """Compute shortest angular difference between two angles."""
-        """Compute shortest angular difference between two angles."""
         d = a - b
         return math.atan2(math.sin(d), math.cos(d))
+

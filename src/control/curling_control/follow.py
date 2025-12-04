@@ -20,8 +20,6 @@ from .navigation_strategies import (
     PotentialFieldStrategy,
     DirectGoalStrategy,
     DWAStrategy,
-    IntegratedYawDirectGoalStrategy,
-    # ViewpointStrategy,
     GridDirectGoalStrategy,
     GridDirectGoalStrategyObstacle,
     GridPotentialFieldStrategy,
@@ -31,10 +29,7 @@ from .navigation_strategies import (
 AVAILABLE_STRATEGIES = {
     "potential_field": PotentialFieldStrategy,
     "direct_goal": DirectGoalStrategy,
-    "integrated_yaw_direct_goal": IntegratedYawDirectGoalStrategy,
-    "direct_goal_integrated_yaw": IntegratedYawDirectGoalStrategy,
     "dwa": DWAStrategy,
-    # "viewpoint": ViewpointStrategy,
     "discretized": GridDirectGoalStrategy,
     "discretized_obstacle": GridDirectGoalStrategyObstacle,
     "grid_potential_field": GridPotentialFieldStrategy,
@@ -150,6 +145,9 @@ class NavigationWithAvoidanceNode(Node):
 
         # Obstacles in world frame
         self.obstacles = []  # List of (x, y) tuples
+        
+        # Goal tracking
+        self.goal_reached = False
 
         # ROS Subscriptions
         self.sub_pose = self.create_subscription(
@@ -243,9 +241,15 @@ class NavigationWithAvoidanceNode(Node):
         1. Checks if robot pose is available
         2. Calls the strategy to compute control commands
         3. Publishes the commands and optional visualization data
+        
+        Once the goal is reached, stops publishing commands entirely.
         """
         # Wait for robot pose to be available
         if self.robot_x is None or self.robot_yaw is None:
+            return
+        
+        # If goal already reached, stop sending commands
+        if self.goal_reached:
             return
 
         # Read target parameters dynamically (allows live updates)
@@ -286,7 +290,16 @@ class NavigationWithAvoidanceNode(Node):
 
         # Log when goal is reached
         if goal_reached:
-            self.get_logger().info("Target reached.")
+            self.goal_reached = True
+            self.get_logger().info("Target reached - shutting down.")
+            # Publish one final zero-velocity command to ensure robot stops
+            stop_cmd = Twist()
+            stop_cmd.linear.x = 0.0
+            stop_cmd.angular.z = 0.0
+            self.cmd_pub.publish(stop_cmd)
+            # Shutdown ROS2 gracefully
+            self.destroy_node()
+            rclpy.shutdown()
 
     # -------------------------------------------------------------------
     # Grid debug publishing

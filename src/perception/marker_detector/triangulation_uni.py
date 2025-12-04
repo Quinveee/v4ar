@@ -14,6 +14,7 @@ import math
 import time
 
 from .solvers.new_solver import LeastSquaresSolver
+from .solvers.weighted_least_squares import WeightedLeastSquaresSolver
 from .utils import compute_average_yaw_from_markers
 
 
@@ -37,11 +38,15 @@ class TriangulationUniNode(Node):
         self.declare_parameter('oak_weight', 1.0)
         self.declare_parameter('mono_weight', 1.0)
         self.declare_parameter('detection_timeout', 0.5)
+        self.declare_parameter('solver_type', 'least_squares')
+        self.declare_parameter('weight_power', 2.0)
 
         config_path = self.get_parameter('marker_config').value
         self.oak_weight = self.get_parameter('oak_weight').value
         self.mono_weight = self.get_parameter('mono_weight').value
         self.detection_timeout = self.get_parameter('detection_timeout').value
+        solver_type = self.get_parameter('solver_type').value
+        weight_power = self.get_parameter('weight_power').value
 
         # --- Load config ---
         if not os.path.isabs(config_path):
@@ -51,8 +56,13 @@ class TriangulationUniNode(Node):
         self.marker_map = load_marker_config(config_path)
         self.get_logger().info(f"Loaded {len(self.marker_map)} markers from {config_path}")
 
-        # --- Initialize solver (same as triangulation_node) ---
-        self.solver = LeastSquaresSolver()
+        # --- Initialize solver based on solver_type parameter ---
+        if solver_type == 'weighted_least_squares':
+            self.solver = WeightedLeastSquaresSolver(weight_power=weight_power)
+            self.get_logger().info(f"Using WeightedLeastSquaresSolver (weight_power={weight_power})")
+        else:
+            self.solver = LeastSquaresSolver()
+            self.get_logger().info("Using LeastSquaresSolver (geometric + residual selection)")
 
         # --- Detection storage ---
         self.oak_detections = {}   # marker_id -> (marker_obj, timestamp)
