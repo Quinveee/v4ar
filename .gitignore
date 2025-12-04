@@ -3,6 +3,8 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+/rosbag2_2025_12_04-15_01_53
+
 # C extensions
 *.so
 
