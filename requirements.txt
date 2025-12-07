@@ -1,0 +1,13 @@
+# Python dependencies for v4ar ROS 2 project
+# NumPy must be < 2.0 for compatibility with cv_bridge (compiled with NumPy 1.x)
+numpy<2.0
+
+# OpenCV for image processing (if not provided by ROS packages)
+opencv-python>=4.5.0
+
+# Point cloud visualization
+open3d>=0.17.0
+
+# Plotting and visualization
+matplotlib>=3.5.0
+
