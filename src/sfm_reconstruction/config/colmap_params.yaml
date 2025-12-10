@@ -1,0 +1,78 @@
+# COLMAP Feature Extraction Parameters
+feature_extraction:
+  # Image format
+  image_list_path: ""
+  image_path: "./images"
+  
+  # Feature detection
+  sift:
+    num_threads: -1  # Auto-detect
+    use_gpu: true
+    gpu_index: "0"
+    first_octave: 0
+    num_octaves: 4
+    octave_resolution: 3
+    peak_threshold: 0.02
+    edge_threshold: 10.0
+    max_num_features: 8192
+    
+  # Descriptor matching
+  matcher:
+    use_gpu: true
+    gpu_index: "0"
+    max_num_matches: 32768
+    max_error: 4.0
+    cross_check: true
+    max_ratio: 0.8
+    max_distance: 0.7
+    filter: "none"  # none, filt_dist_ratio, filt_orientation
+
+# COLMAP Feature Matching Parameters
+feature_matching:
+  exhaustive_matching:
+    block_size: 32
+    use_gpu: true
+    gpu_index: "0"
+    
+  sequential_matching:
+    sequential_overlap: 4
+    loop_detection: false
+    loop_detection_period: 10
+    loop_detection_num_images: 50
+
+# Sparse Reconstruction Parameters  
+sparse_reconstruction:
+  mapper:
+    abs_pose_min_num_inliers: 30
+    abs_pose_min_inlier_ratio: 0.25
+    filter_max_overlap: 0.0
+    init_min_num_inliers: 100
+    init_min_inlier_ratio: 0.3
+    local_ba_num_images: 6
+    min_model_size: 10
+    num_threads: -1
+    
+# Dense Reconstruction Parameters
+dense_reconstruction:
+  undistortion:
+    blank_pixels: 0
+    max_image_size: 2000
+    min_scale: 0.2
+    max_scale: 2.0
+    output_type: "COLMAP"  # COLMAP or PMVS
+    
+  patch_match_stereo:
+    window_radius: 5
+    window_step: 1
+    num_samples: 15
+    sigma_spatial: 5.0
+    sigma_color: 0.2
+    top_k: 4
+    max_corner_ratio: 0.4
+    geom_consistency: true
+    
+  stereo_fusion:
+    min_num_consistent: 3
+    max_reproj_error: 2.0
+    quality_threshold: 0.5
+    max_depth_mm: 4000  # millimeters

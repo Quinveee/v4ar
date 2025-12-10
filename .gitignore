@@ -4,6 +4,8 @@ __pycache__/
 *$py.class
 
 /rosbag2_2025_12_04-15_01_53
+rosbag2_2025_12_05-13_42_24.tar.gz
+rtabmap_bag_edit.tgz
 
 # C extensions
 *.so

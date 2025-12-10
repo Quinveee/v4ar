@@ -1,0 +1,35 @@
+# Default camera configurations for common cameras
+
+# Intel RealSense D435
+realsense_d435:
+  image_topic: "/camera/color/image_raw"
+  camera_info_topic: "/camera/color/camera_info"
+  depth_topic: "/camera/aligned_depth_to_color/image_raw"
+  matcher: "exhaustive"
+
+# OAK-D Cameras
+oakd:
+  image_topic: "/oak/rgb/image_raw"
+  camera_info_topic: "/oak/rgb/camera_info"
+  depth_topic: "/oak/depth/image_raw"
+  matcher: "exhaustive"
+
+# Standard USB camera
+usb_camera:
+  image_topic: "/camera/image_raw"
+  camera_info_topic: "/camera/camera_info"
+  matcher: "exhaustive"
+
+# Stereo camera
+stereo_camera:
+  left_image_topic: "/stereo/left/image_raw"
+  right_image_topic: "/stereo/right/image_raw"
+  left_camera_info: "/stereo/left/camera_info"
+  right_camera_info: "/stereo/right/camera_info"
+  matcher: "sequential"
+
+# Default configuration
+default:
+  image_topic: "/camera/color/image_raw"
+  camera_info_topic: "/camera/color/camera_info"
+  matcher: "exhaustive"
