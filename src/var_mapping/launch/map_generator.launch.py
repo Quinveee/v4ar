@@ -41,6 +41,7 @@ def generate_launch_description():
     localization = LaunchConfiguration('localization')
     delete_db = LaunchConfiguration('delete_db')
     depth_filter_level = LaunchConfiguration('depth_filter_level')
+    subscribe_scan = LaunchConfiguration('subscribe_scan')
     
     # Create maps directory structure
     maps_dir = Path.home() / 'v4ar' / 'maps' / 'rtabmap'
@@ -83,6 +84,12 @@ def generate_launch_description():
         'depth_filter_level',
         default_value='-1',
         description='Depth filter level: -1 (no filter, use raw), 0-3 (filter level)'
+    )
+    
+    declare_subscribe_scan = DeclareLaunchArgument(
+        'subscribe_scan',
+        default_value='true',
+        description='Subscribe to laser scan topic (/scan) for RTAB-Map'
     )
     
     # Get UGV model from environment and create URDF path
@@ -196,7 +203,7 @@ def generate_launch_description():
         'queue_size': queue_size,
         "subscribe_rgb": True,
         "subscribe_depth": True,
-        'subscribe_scan': False,
+        'subscribe_scan': subscribe_scan,
         "subscribe_odom_info": False,
         "approx_sync": True,
         "Rtabmap/DetectionRate": "3.5",
@@ -228,6 +235,7 @@ def generate_launch_description():
             ("rgb/image", "oak/rgb/image_rect"),
             ("rgb/camera_info", "oak/rgb/camera_info"),
             ("depth/image", depth_topic),
+            ("scan", "/scan"),
         ]
         
         nodes_to_launch = []
@@ -286,6 +294,7 @@ def generate_launch_description():
         declare_localization,
         declare_delete_db,
         declare_depth_filter_level,
+        declare_subscribe_scan,
         robot_state_publisher_node,
         static_tf_base_lidar,
         static_tf_base_footprint_to_base_link,
