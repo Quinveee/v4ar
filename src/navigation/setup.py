@@ -24,6 +24,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'simple_navigator = navigation.simple_navigator:main',
         ],
     },
 )
