@@ -1,0 +1,234 @@
+# Nav2 configuration for UGV rover on final_map.pgm
+# Assumes:
+# - Static map YAML at ~/Downloads/final_map.yaml
+# - Frames: map -> odom -> base_footprint
+# - Laser scan on /scan
+# - Velocity commands on /cmd_vel
+
+amcl:
+  ros__parameters:
+    use_sim_time: false
+
+    # Frames
+    global_frame_id: map
+    odom_frame_id: odom
+    base_frame_id: base_footprint
+
+    scan_topic: /scan
+    min_particles: 500
+    max_particles: 2000
+    laser_min_range: 0.05
+    laser_max_range: 10.0
+    laser_model_type: likelihood_field
+
+    # Motion model (tune if odom is noisy)
+    odom_model_type: diff
+    alpha1: 0.2     # rot noise from rot
+    alpha2: 0.2     # rot noise from trans
+    alpha3: 0.2     # trans noise from trans
+    alpha4: 0.2     # trans noise from rot
+
+    set_initial_pose: false
+    always_reset_initial_pose: false
+
+    update_min_d: 0.05
+    update_min_a: 0.05
+
+    resample_interval: 1
+    transform_tolerance: 0.5
+    gui_publish_rate: 10.0
+
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    yaml_filename: /Users/olivervanerven/Documents/Robotics/v4ar/final_map.yaml
+    frame_id: map
+
+# Lifecycle manager controls Nav2 nodes
+lifecycle_manager:
+  ros__parameters:
+    use_sim_time: false
+    autostart: true
+    node_names:
+      - map_server
+      - amcl
+      - controller_server
+      - planner_server
+      - behavior_server
+      - bt_navigator
+      - waypoint_follower
+
+# Global costmap (planner)
+global_costmap:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_footprint
+    rolling_window: false
+    track_unknown_space: true
+    always_send_full_costmap: true
+    update_frequency: 3.0
+    publish_frequency: 1.0
+    transform_tolerance: 0.5
+    resolution: 0.05
+
+    robot_radius: 0.22    # adjust to rover size
+    footprint_padding: 0.01
+
+    plugins:
+      - {name: static_layer,   type: "nav2_costmap_2d::StaticLayer"}
+      - {name: obstacle_layer, type: "nav2_costmap_2d::ObstacleLayer"}
+      - {name: inflation_layer,type: "nav2_costmap_2d::InflationLayer"}
+
+    static_layer:
+      map_subscribe_transient_local: true
+
+    obstacle_layer:
+      observation_sources: scan
+      scan:
+        topic: /scan
+        max_obstacle_height: 1.0
+        clearing: true
+        marking: true
+        data_type: "LaserScan"
+        expected_update_rate: 0.1
+        obstacle_range: 6.0
+        raytrace_range: 8.0
+
+    inflation_layer:
+      inflation_radius: 0.35
+      cost_scaling_factor: 3.0
+
+# Local costmap (controller)
+local_costmap:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: odom
+    robot_base_frame: base_footprint
+    rolling_window: true
+    track_unknown_space: false
+    always_send_full_costmap: true
+    update_frequency: 10.0
+    publish_frequency: 5.0
+    transform_tolerance: 0.5
+    resolution: 0.05
+
+    width: 4.0
+    height: 4.0
+
+    robot_radius: 0.22
+    footprint_padding: 0.01
+
+    plugins:
+      - {name: obstacle_layer, type: "nav2_costmap_2d::ObstacleLayer"}
+      - {name: inflation_layer,type: "nav2_costmap_2d::InflationLayer"}
+
+    obstacle_layer:
+      observation_sources: scan
+      scan:
+        topic: /scan
+        max_obstacle_height: 1.0
+        clearing: true
+        marking: true
+        data_type: "LaserScan"
+        expected_update_rate: 0.1
+        obstacle_range: 6.0
+        raytrace_range: 8.0
+
+    inflation_layer:
+      inflation_radius: 0.35
+      cost_scaling_factor: 3.0
+
+# Planner server (global planner)
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 1.0
+    planner_plugins: ["GridBased"]
+
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.2
+      use_astar: false
+      allow_unknown: true
+
+# Controller server (local planner)
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    controller_plugins: ["FollowPath"]
+    min_x_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+
+    FollowPath:
+      plugin: "dwb_core::DWBLocalPlanner"
+
+      # Basic kinematics (tune to real rover)
+      max_vel_x: 0.3
+      min_vel_x: 0.0
+      max_vel_theta: 1.0
+      min_vel_theta: -1.0
+      acc_lim_x: 0.5
+      acc_lim_theta: 1.5
+
+      # Sampling
+      vx_samples: 10
+      vtheta_samples: 20
+      sim_time: 2.0
+      linear_granularity: 0.05
+      angular_granularity: 0.05
+      transform_tolerance: 0.5
+
+      # Cost functions
+      critics:
+        - "ObstacleFootprint"
+        - "GoalAlign"
+        - "PathAlign"
+        - "PathDist"
+        - "GoalDist"
+
+      ObstacleFootprint.scale: 0.01
+      PathAlign.scale: 32.0
+      GoalAlign.scale: 24.0
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
+
+# BT Navigator
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_footprint
+    transform_tolerance: 0.5
+    default_nav_to_pose_bt_xml: "navigate_w_replanning_and_recovery.xml"
+    default_nav_through_poses_bt_xml: "navigate_through_poses_w_replanning_and_recovery.xml"
+
+# Behavior server (recoveries)
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_footprint
+    transform_tolerance: 0.5
+
+    behaviors:
+      - "spin"
+      - "backup"
+      - "drive_on_heading"
+      - "wait"
+
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+
+# Waypoint follower (optional)
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: false
+    loop_rate: 20
+    stop_on_failure: false
