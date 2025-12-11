@@ -206,12 +206,35 @@ def generate_launch_description():
         'subscribe_scan': subscribe_scan,
         "subscribe_odom_info": False,
         "approx_sync": True,
-        "Rtabmap/DetectionRate": "3.5",
+        
+        # Synchronization parameters for mixed-rate topics
+        "sync_queue_size": 10,  # Larger queue for async topics
+        "topic_queue_size": 10,  # Match sync queue
+        "approx_sync_max_interval": 0.2,  # 5 seconds tolerance for slow playback
+        
+        "Rtabmap/DetectionRate": "1.5",
         "use_sim_time": use_sim_time,
         "database_path": database_path,
         "Vis/MinInliers": "20",  # Require more feature matches
-        "Vis/MaxDepth": "3.0",   # Limit depth to 4 meters (adjust based on your environment)
+        "Vis/MaxDepth": "2.0",   # Limit depth to 4 meters (adjust based on your environment)
         "Vis/MinDepth": "0.3",   # Minimum depth
+        
+        # 3D point cloud map parameters
+        "Grid/FromDepth": "true",  # Create 3D map from depth images
+        "Grid/3D": "true",  # Enable full 3D occupancy grid
+        "Grid/RayTracing": "true",  # Ray tracing for better 3D structure
+        "Grid/CellSize": "0.05",  # 5cm resolution
+        "Grid/RangeMax": "3.0",  # Match depth sensor range
+        "Grid/GroundIsObstacle": "false",
+        "Grid/MaxGroundHeight": "0.1",
+        "Grid/MaxObstacleHeight": "0.6",
+        
+        # Point cloud assembly - publish full 3D map
+        "cloud_assembled": "true",  # Assemble point clouds from all nodes
+        "cloud_voxel_size": "0.01",  # 1cm voxel size for assembled cloud
+        "cloud_decimation": "1",  # Use all points
+        "cloud_max_depth": "3.0",
+        "cloud_min_depth": "0.3",
     }
 
     # Dynamic RTAB-Map nodes with conditional depth remapping
