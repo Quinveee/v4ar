@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 import os
 from glob import glob
 
@@ -7,7 +7,8 @@ package_name = 'navigation'
 setup(
     name=package_name,
     version='0.0.1',
-    packages=[package_name],
+    packages=['navigation', 'navigation.planning', 'navigation.planning.planner'],
+    include=["navigation", "*navigation*", "*launch*", "planning", "*planning*"],
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -24,7 +25,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'simple_navigator = navigation.simple_navigator:main',
+            'planner = navigation.planning.path_planner:main',
         ],
     },
 )
