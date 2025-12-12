@@ -37,12 +37,16 @@ class PathPlannerNode(Node):
         self.declare_parameter("inflation", "none")
         self.declare_parameter("inflation_radius", 0.5)
         self.declare_parameter("inflation_scaling", 3.0)
+        self.declare_parameter("use_nav2_costmap", False)
+        self.declare_parameter("costmap_topic", "/local_costmap/costmap")
 
         yaml_path = self.get_parameter("map_yaml").value
         planner_name = self.get_parameter("planner").value
         inflation_name = self.get_parameter("inflation").value
         inflation_radius = self.get_parameter("inflation_radius").value
         inflation_scaling = self.get_parameter("inflation_scaling").value
+        use_nav2_costmap = bool(self.get_parameter("use_nav2_costmap").value)
+        costmap_topic = str(self.get_parameter("costmap_topic").value)
 
         # --------------------------
         # Choose planner strategy
@@ -61,7 +65,7 @@ class PathPlannerNode(Node):
         self.H, self.W = self.occ_grid.shape
 
         # --------------------------
-        # Choose inflation strategy
+        # Choose inflation strategy (only used when not subscribing to Nav2 costmap)
         # --------------------------
         if inflation_name == "euclidean":
             self.inflator = EuclideanInflation(
@@ -81,10 +85,50 @@ class PathPlannerNode(Node):
 
         self.get_logger().info(f"Inflation strategy: {inflation_name}")
 
-        # --------------------------
-        # Inflate costmap
-        # --------------------------
-        self.costmap = self.inflator.inflate(self.occ_grid)
+        # If requested, subscribe to an external Nav2 costmap topic instead of using our inflated one.
+        self.use_nav2_costmap = use_nav2_costmap
+        self.costmap_topic = costmap_topic
+
+        if self.use_nav2_costmap:
+            # subscribe to OccupancyGrid topic published by Nav2 (or other) costmap
+            self.get_logger().info(f"Subscribing to Nav2 costmap topic: {self.costmap_topic}")
+            self.create_subscription(
+                OccupancyGrid,
+                self.costmap_topic,
+                self.nav2_costmap_callback,
+                10,
+            )
+            # create an initial costmap fallback from our inflator until we receive external costmap
+            self.costmap = self.inflator.inflate(self.occ_grid)
+        else:
+            # --------------------------
+            # Inflate costmap (local fallback)
+            # --------------------------
+            self.costmap = self.inflator.inflate(self.occ_grid)
+
+        # --- Debugging: report costmap stats and save image ---
+        try:
+            unique_vals = np.unique(self.costmap)
+            self.get_logger().info(f"Costmap values (unique): {unique_vals}")
+            self.get_logger().info(f"Costmap min/max: {int(self.costmap.min())}/{int(self.costmap.max())}")
+
+            # histogram of values (coarse bins)
+            vals, counts = np.unique(self.costmap, return_counts=True)
+            top = list(zip(vals.tolist(), counts.tolist()))[:30]
+            self.get_logger().info(f"Costmap sample histogram (value,count) first 30: {top}")
+
+            # save visualization for quick inspection
+            try:
+                from PIL import Image
+                img = Image.fromarray(self.costmap)
+                out_path = "planner_costmap.png"
+                img.save(out_path)
+                self.get_logger().info(f"Saved costmap image to {out_path}")
+            except Exception as e:
+                self.get_logger().warn(f"Failed to save costmap image: {e}")
+        except Exception as e:
+            # keep node working even if debug fails
+            self.get_logger().warn(f"Costmap debug failed: {e}")
 
         # --------------------------
         # Start & goal from RViz
@@ -117,7 +161,7 @@ class PathPlannerNode(Node):
         self.map_pub = self.create_publisher(OccupancyGrid, "planner_map", 10)
         self.publish_map()
 
-
+        self.get_logger().info(str(np.unique(self.costmap)))
         self.get_logger().info("Ready. Click '2D Pose Estimate' and '2D Goal Pose' in RViz.")
 
 
@@ -196,6 +240,35 @@ class PathPlannerNode(Node):
 
         self.map_pub.publish(msg)
         self.get_logger().info("Published planner_map.")
+
+
+    # ------------------------------------------------------------------
+    # Callback to receive external Nav2 costmap (OccupancyGrid)
+    # ------------------------------------------------------------------
+    def nav2_costmap_callback(self, msg: OccupancyGrid):
+        try:
+            # msg.data is a flat list of size height*width in row-major order
+            arr = np.array(msg.data, dtype=np.int8).reshape((msg.info.height, msg.info.width))
+
+            # Convert occupancy values (0..100, -1) to planner internal costmap (0..254)
+            # Map 0 -> 0, 100 -> 254, unknown(-1) -> 127
+            conv = np.zeros_like(arr, dtype=np.uint8)
+            # known free
+            conv[arr == 0] = 0
+            # known occupied
+            conv[arr == 100] = 254
+            # unknown
+            conv[arr < 0] = 127
+
+            # For any intermediate values (rare), scale linearly
+            mask_mid = (arr > 0) & (arr < 100)
+            conv[mask_mid] = np.clip((arr[mask_mid].astype(np.float32) / 100.0) * 254.0, 0, 254).astype(np.uint8)
+
+            # assign to current costmap (note: arr shape is height x width -> [y,x])
+            self.costmap = conv
+            self.get_logger().info(f"Received Nav2 costmap ({msg.info.width}x{msg.info.height}), min/max: {int(self.costmap.min())}/{int(self.costmap.max())}")
+        except Exception as e:
+            self.get_logger().warn(f"Failed to process Nav2 costmap: {e}")
 
 
     # ======================================================================
