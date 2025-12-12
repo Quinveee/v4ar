@@ -51,7 +51,7 @@ def generate_launch_description():
     
     declare_depth_filter_level = DeclareLaunchArgument(
         'depth_filter_level',
-        default_value='2',
+        default_value='-1',
         description='Depth filter level: -1 (no filter), 0-3 (filter level)'
     )
     
