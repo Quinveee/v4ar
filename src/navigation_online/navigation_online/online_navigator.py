@@ -35,9 +35,10 @@ Topics:
 
 import rclpy
 from rclpy.node import Node
+from rclpy.action import ActionClient
 from nav_msgs.msg import OccupancyGrid, Path, Odometry
 from geometry_msgs.msg import PoseStamped, Twist
-from nav2_msgs.srv import ComputePathToPose
+from nav2_msgs.action import ComputePathToPose
 import math
 from typing import Optional, Tuple
 from dataclasses import dataclass
@@ -90,9 +91,9 @@ class OnlineNavigator(Node):
         self.goal_pose: Optional[PoseStamped] = None
         self.goal_reached: bool = False
         
-        # Nav2 Planner Service Client
-        planner_service = f'/{planner_server_name}/compute_path_to_pose'
-        self.planner_client = self.create_client(ComputePathToPose, planner_service)
+        # Nav2 Planner Action Client
+        planner_action = f'/{planner_server_name}/compute_path_to_pose'
+        self.planner_action_client = ActionClient(self, ComputePathToPose, planner_action)
         
         # Publishers
         self.cmd_pub = self.create_publisher(Twist, '/navigation_commands', 10)
@@ -112,13 +113,14 @@ class OnlineNavigator(Node):
         control_period = 1.0 / control_freq
         self.control_timer = self.create_timer(control_period, self.control_loop)
         
-        # Wait for planner server
-        self.get_logger().info(f'Waiting for Nav2 planner server at {planner_service}...')
-        while not self.planner_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Planner server not available, waiting...')
+        # Wait for planner action server
+        planner_action = f'/{planner_server_name}/compute_path_to_pose'
+        self.get_logger().info(f'Waiting for Nav2 planner action server at {planner_action}...')
+        while not self.planner_action_client.wait_for_server(timeout_sec=1.0):
+            self.get_logger().info('Planner action server not available, waiting...')
         
         self.get_logger().info('Online Navigator initialized (laptop side)')
-        self.get_logger().info('Using Nav2 planner server for path planning')
+        self.get_logger().info('Using Nav2 planner action server for path planning')
         self.get_logger().info('Waiting for map, odometry, and goal...')
     
     def map_callback(self, msg: OccupancyGrid):
@@ -168,43 +170,61 @@ class OnlineNavigator(Node):
         if self.current_map is None or self.current_pose is None or self.goal_pose is None:
             return
         
-        # Create request for Nav2 planner
-        request = ComputePathToPose.Request()
+        # Create goal for Nav2 planner action
+        goal_msg = ComputePathToPose.Goal()
         
         # Set start pose (current robot position)
-        request.start.header.stamp = self.get_clock().now().to_msg()
-        request.start.header.frame_id = 'map'
-        request.start.pose.position.x = self.current_pose.x
-        request.start.pose.position.y = self.current_pose.y
-        request.start.pose.position.z = 0.0
+        goal_msg.start.header.stamp = self.get_clock().now().to_msg()
+        goal_msg.start.header.frame_id = 'map'
+        goal_msg.start.pose.position.x = self.current_pose.x
+        goal_msg.start.pose.position.y = self.current_pose.y
+        goal_msg.start.pose.position.z = 0.0
         
         # Convert yaw to quaternion
         yaw = self.current_pose.theta
-        request.start.pose.orientation.x = 0.0
-        request.start.pose.orientation.y = 0.0
-        request.start.pose.orientation.z = math.sin(yaw / 2.0)
-        request.start.pose.orientation.w = math.cos(yaw / 2.0)
+        goal_msg.start.pose.orientation.x = 0.0
+        goal_msg.start.pose.orientation.y = 0.0
+        goal_msg.start.pose.orientation.z = math.sin(yaw / 2.0)
+        goal_msg.start.pose.orientation.w = math.cos(yaw / 2.0)
         
         # Set goal pose
-        request.goal = self.goal_pose
-        request.goal.header.stamp = self.get_clock().now().to_msg()
-        request.goal.header.frame_id = 'map'
+        goal_msg.goal = self.goal_pose
+        goal_msg.goal.header.stamp = self.get_clock().now().to_msg()
+        goal_msg.goal.header.frame_id = 'map'
         
         # Set tolerance
-        request.tolerance = 0.2
+        goal_msg.tolerance = 0.2
         
-        # Call Nav2 planner service
-        self.get_logger().info('Calling Nav2 planner service...')
-        future = self.planner_client.call_async(request)
-        future.add_done_callback(self.planner_response_callback)
+        # Send goal to Nav2 planner action server
+        self.get_logger().info('Sending goal to Nav2 planner action server...')
+        send_goal_future = self.planner_action_client.send_goal_async(goal_msg)
+        send_goal_future.add_done_callback(self.planner_goal_response_callback)
     
-    def planner_response_callback(self, future):
-        """Handle response from Nav2 planner."""
+    def planner_goal_response_callback(self, future):
+        """Handle response from sending goal to Nav2 planner."""
         try:
-            response = future.result()
+            goal_handle = future.result()
+            if not goal_handle.accepted:
+                self.get_logger().error('Nav2 planner rejected the goal!')
+                self.current_path = None
+                return
             
-            if response.path.poses:
-                self.current_path = response.path
+            # Get result
+            self.get_logger().info('Nav2 planner accepted goal, waiting for result...')
+            result_future = goal_handle.get_result_async()
+            result_future.add_done_callback(self.planner_result_callback)
+                
+        except Exception as e:
+            self.get_logger().error(f'Failed to send goal to Nav2 planner: {e}')
+            self.current_path = None
+    
+    def planner_result_callback(self, future):
+        """Handle result from Nav2 planner."""
+        try:
+            result = future.result().result
+            
+            if result.path.poses:
+                self.current_path = result.path
                 self.current_waypoint_idx = 0
                 
                 # Publish path for visualization in RViz

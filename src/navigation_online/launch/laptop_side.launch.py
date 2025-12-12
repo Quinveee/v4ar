@@ -55,9 +55,16 @@ def generate_launch_description():
         description='Depth filter level: -1 (no filter), 0-3 (filter level)'
     )
     
+    declare_subscribe_scan = DeclareLaunchArgument(
+        'subscribe_scan',
+        default_value='false',
+        description='Subscribe to laser scan topic (/scan) for RTAB-Map'
+    )
+    
     use_rviz = LaunchConfiguration('use_rviz')
     use_sim_time = LaunchConfiguration('use_sim_time')
     depth_filter_level = LaunchConfiguration('depth_filter_level')
+    subscribe_scan = LaunchConfiguration('subscribe_scan')
     
     # 1. RTAB-Map SLAM (from var_mapping package)
     rtabmap_launch = IncludeLaunchDescription(
@@ -68,7 +75,7 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'use_rviz': use_rviz,
             'depth_filter_level': depth_filter_level,
-            'subscribe_scan': 'true',  # Use laser scan for better mapping
+            'subscribe_scan': subscribe_scan,
         }.items()
     )
     
@@ -122,6 +129,7 @@ def generate_launch_description():
         declare_use_rviz,
         declare_use_sim_time,
         declare_depth_filter_level,
+        declare_subscribe_scan,
         
         # Nodes
         rtabmap_launch,
