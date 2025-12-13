@@ -88,7 +88,7 @@ def generate_launch_description():
     
     declare_subscribe_scan = DeclareLaunchArgument(
         'subscribe_scan',
-        default_value='true',
+        default_value='false',
         description='Subscribe to laser scan topic (/scan) for RTAB-Map'
     )
     
@@ -220,6 +220,7 @@ def generate_launch_description():
         "Vis/MinDepth": "0.3",   # Minimum depth
         
         # 3D point cloud map parameters
+        "Grid/Sensor": "1",  # Use cloud projection (1) instead of laser scan (0) for occupancy grid
         "Grid/FromDepth": "true",  # Create 3D map from depth images
         "Grid/3D": "true",  # Enable full 3D occupancy grid
         "Grid/RayTracing": "true",  # Ray tracing for better 3D structure

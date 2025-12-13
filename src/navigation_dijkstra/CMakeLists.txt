@@ -12,11 +12,8 @@ find_package(ament_cmake_python REQUIRED)
 # Install Python modules
 ament_python_install_package(${PROJECT_NAME})
 
-# Install scripts
-install(PROGRAMS
-  scripts/planner
-  DESTINATION lib/${PROJECT_NAME}
-)
+# Install entry points from setup.py
+ament_cmake_python_install_scripts(scripts)
 
 # Install launch files
 install(DIRECTORY
