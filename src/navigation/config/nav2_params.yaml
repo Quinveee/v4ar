@@ -7,7 +7,7 @@
 
 amcl:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
 
     # Frames
     global_frame_id: map
@@ -40,14 +40,14 @@ amcl:
 
 map_server:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     yaml_filename: final_map.yaml
     frame_id: map
 
 # Lifecycle manager controls Nav2 nodes
 lifecycle_manager:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     autostart: true
     node_names:
       - map_server
@@ -58,51 +58,37 @@ lifecycle_manager:
       - bt_navigator
       - waypoint_follower
 
-# Global costmap (planner)
+# Global costmap (planner) - FOR ONLINE SLAM with rolling window
 global_costmap:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     global_frame: map
     robot_base_frame: base_footprint
-    rolling_window: false
-    track_unknown_space: true
-    always_send_full_costmap: true
-    update_frequency: 3.0
+    rolling_window: true          # CRITICAL: Must be true for online SLAM
+    width: 30                     # MUST be integer for ROS2 parameters
+    height: 30                    # MUST be integer for ROS2 parameters
+    track_unknown_space: true      # Allow planning through unexplored areas
+    always_send_full_costmap: false
+    update_frequency: 1.0
     publish_frequency: 1.0
     transform_tolerance: 0.5
     resolution: 0.05
-
-    robot_radius: 0.22    # adjust to rover size
+    robot_radius: 0.22
     footprint_padding: 0.01
-
-    plugins:
-      - {name: static_layer,   type: "nav2_costmap_2d::StaticLayer"}
-      - {name: obstacle_layer, type: "nav2_costmap_2d::ObstacleLayer"}
-      - {name: inflation_layer,type: "nav2_costmap_2d::InflationLayer"}
-
+    plugins: ["static_layer", "inflation_layer"]
     static_layer:
+      plugin: "nav2_costmap_2d::StaticLayer"
       map_subscribe_transient_local: true
-
-    obstacle_layer:
-      observation_sources: scan
-      scan:
-        topic: /scan
-        max_obstacle_height: 1.0
-        clearing: true
-        marking: true
-        data_type: "LaserScan"
-        expected_update_rate: 0.1
-        obstacle_range: 6.0
-        raytrace_range: 8.0
-
+      enabled: true
     inflation_layer:
-      inflation_radius: 0.35
-      cost_scaling_factor: 3.0
+      plugin: "nav2_costmap_2d::InflationLayer"
+      inflation_radius: 0.25
+      cost_scaling_factor: 5.0
 
 # Local costmap (controller)
 local_costmap:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     global_frame: odom
     robot_base_frame: base_footprint
     rolling_window: true
@@ -121,7 +107,7 @@ local_costmap:
 
     plugins:
       - {name: obstacle_layer, type: "nav2_costmap_2d::ObstacleLayer"}
-      - {name: inflation_layer,type: "nav2_costmap_2d::InflationLayer"}
+      - {name: inflation_layer, type: "nav2_costmap_2d::InflationLayer"}
 
     obstacle_layer:
       observation_sources: scan
@@ -136,13 +122,12 @@ local_costmap:
         raytrace_range: 8.0
 
     inflation_layer:
-      inflation_radius: 0.35
+      inflation_radius: 0.15
       cost_scaling_factor: 3.0
 
-# Planner server (global planner)
 planner_server:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     expected_planner_frequency: 1.0
     planner_plugins: ["GridBased"]
 
@@ -152,10 +137,39 @@ planner_server:
       use_astar: false
       allow_unknown: true
 
+    # INDENTATION IS CRITICAL HERE:
+    # "global_costmap" must be aligned with "GridBased" (4 spaces from left)
+    global_costmap:
+      use_sim_time: true
+      global_frame: map
+      robot_base_frame: base_footprint
+      rolling_window: false
+      track_unknown_space: true   # <--- This is the key we need!
+      always_send_full_costmap: true
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      transform_tolerance: 0.5
+      resolution: 0.05
+      robot_radius: 0.22
+      footprint_padding: 0.01
+      plugins: ["static_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+        enabled: true
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.25
+        cost_scaling_factor: 5.0
+
+planner_server_rclcpp_node:
+  ros__parameters:
+    use_sim_time: true
+
 # Controller server (local planner)
 controller_server:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     controller_plugins: ["FollowPath"]
     min_x_velocity_threshold: 0.001
     min_theta_velocity_threshold: 0.001
@@ -196,7 +210,7 @@ controller_server:
 # BT Navigator
 bt_navigator:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     global_frame: map
     robot_base_frame: base_footprint
     transform_tolerance: 0.5
@@ -206,7 +220,7 @@ bt_navigator:
 # Behavior server (recoveries)
 behavior_server:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     global_frame: map
     robot_base_frame: base_footprint
     transform_tolerance: 0.5
@@ -229,6 +243,6 @@ behavior_server:
 # Waypoint follower (optional)
 waypoint_follower:
   ros__parameters:
-    use_sim_time: false
+    use_sim_time: true
     loop_rate: 20
     stop_on_failure: false

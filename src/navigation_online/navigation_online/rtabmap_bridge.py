@@ -18,6 +18,7 @@ Topics:
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
+from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
 import numpy as np
 from typing import Optional
 
@@ -46,15 +47,29 @@ class RTABMapBridge(Node):
         # State
         self.last_map: Optional[OccupancyGrid] = None
         
-        # Publisher
+        # Publisher with TRANSIENT_LOCAL durability (required by Nav2 costmap)
+        # This ensures late subscribers (like planner_server) can get the latest map
+        map_qos = QoSProfile(
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
         self.map_pub = self.create_publisher(
-            OccupancyGrid, '/map', 10)
+            OccupancyGrid, '/map', map_qos)
         
         # Subscribers
         if use_rtabmap_grid:
             # RTAB-Map can publish occupancy grid directly if configured with Grid/2D
+            # Use TRANSIENT_LOCAL to match RTAB-Map's QoS
+            grid_qos = QoSProfile(
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=10
+            )
             self.grid_sub = self.create_subscription(
-                OccupancyGrid, '/rtabmap/grid_map', self.grid_map_callback, 10)
+                OccupancyGrid, '/rtabmap/grid_map', self.grid_map_callback, grid_qos)
             self.get_logger().info('Subscribed to /rtabmap/grid_map')
         else:
             if HAS_RTABMAP_MSGS:
